@@ -13,6 +13,7 @@ struct IssueActions {
     var edit: (Issue) -> Void
     var clone: (Issue) -> Void
     var assign: (Issue) -> Void
+    var editLabels: (Issue) -> Void
     var copyToRepo: ([Issue]) -> Void
     var moveToRepo: ([Issue]) -> Void
     var close: (Issue) -> Void
@@ -104,6 +105,12 @@ func issueContextMenu(for issue: Issue, selection: Set<Issue>, actions: IssueAct
             actions.assign(issue)
         } label: {
             SwiftUI.Label("Assign Issue", systemImage: "person.badge.plus")
+        }
+        .disabled(isReadOnly)
+        Button {
+            actions.editLabels(issue)
+        } label: {
+            SwiftUI.Label("Labels…", systemImage: "tag")
         }
         .disabled(isReadOnly)
         Button {

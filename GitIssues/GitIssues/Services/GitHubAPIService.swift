@@ -164,6 +164,27 @@ class GitHubAPIService {
         return (issue, comments)
     }
 
+    /// Fetches an issue's activity log: label/assignee/state changes, renames, cross-references, ...
+    /// Comments are not included. Events are returned oldest-first.
+    func fetchIssueActivity(owner: String, repo: String, number: Int) async throws -> [IssueActivity] {
+        let variables: [String: Any] = [
+            "owner": owner,
+            "repo": repo,
+            "number": number
+        ]
+
+        // The log is supplementary: one event we can't read must not hide all the others.
+        let response: IssueActivityResponse = try await graphQLClient.execute(
+            query: GraphQLQueries.issueActivityQuery,
+            variables: variables,
+            tolerateErrors: true
+        )
+
+        return response.repository.issue.timelineItems.nodes
+            .compactMap { $0.toActivity() }
+            .sorted { $0.createdAt < $1.createdAt }
+    }
+
     /// Creates a new issue in a repository
     /// - Parameters:
     ///   - repositoryId: The ID of the repository

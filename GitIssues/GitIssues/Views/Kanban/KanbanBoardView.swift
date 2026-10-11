@@ -115,7 +115,12 @@ struct KanbanColumnView: View {
                             KanbanCardView(
                                 issue: issue,
                                 isSelected: selectedIssues.contains(issue),
-                                onTap: { handleTap(issue) }
+                                onTap: { handleTap(issue) },
+                                onDoubleTap: {
+                                    guard !issue.repository.isReadOnly else { return }
+                                    selectedIssues = [issue]
+                                    actions.edit(issue)
+                                }
                             )
                             .draggableIf(!issue.repository.isReadOnly, issue.id)
                             .contextMenu {
@@ -242,6 +247,7 @@ struct KanbanCardView: View {
     let issue: Issue
     let isSelected: Bool
     let onTap: () -> Void
+    var onDoubleTap: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -287,6 +293,8 @@ struct KanbanCardView: View {
                 .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
         )
         .contentShape(Rectangle())
+        // The double-tap recogniser must come first so it takes precedence over the single tap.
+        .onTapGesture(count: 2) { onDoubleTap() }
         .onTapGesture { onTap() }
     }
 }

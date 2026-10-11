@@ -19,6 +19,7 @@ struct ContentView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var issueToDelete: Issue?
     @State private var issueToAssign: Issue?
+    @State private var issueForLabels: Issue?
     @State private var showDeleteConfirmation = false
     @State private var sidebarWidth: CGFloat?
     @State private var windowWidth: CGFloat = 1200
@@ -59,6 +60,7 @@ struct ContentView: View {
             },
             clone: { issue in Task { await viewModel.viewModel?.cloneIssue(issue) } },
             assign: { issue in issueToAssign = issue },
+            editLabels: { issue in issueForLabels = issue },
             copyToRepo: { issues in transferRequest = TransferRequest(mode: .copy, issues: issues) },
             moveToRepo: { issues in transferRequest = TransferRequest(mode: .move, issues: issues) },
             close: { issue in Task { await viewModel.viewModel?.closeIssue(issue) } },
@@ -84,6 +86,12 @@ struct ContentView: View {
                 showBatchDeleteConfirmation = true
             }
         )
+    }
+
+    /// Cmd+R: background refresh. `nil` while a load is already in flight (disables the menu item).
+    private var refreshAction: (() -> Void)? {
+        guard let vm = viewModel.viewModel, !vm.isLoading, !vm.isRefreshing else { return nil }
+        return { Task { await vm.loadIssues() } }
     }
 
     private let appStateService = AppStateService()
@@ -209,6 +217,15 @@ struct ContentView: View {
                                 .contextMenu {
                                     issueContextMenu(for: issue, selection: selectedIssues, actions: issueActions)
                                 }
+                                // Double-click opens the editor (simultaneous so the first click
+                                // still selects the row).
+                                .simultaneousGesture(
+                                    TapGesture(count: 2).onEnded {
+                                        guard !issue.repository.isReadOnly else { return }
+                                        selectedIssues = [issue]
+                                        issueActions.edit(issue)
+                                    }
+                                )
                             }
                             .listStyle(.sidebar)
                             .onKeyPress(.return) {
@@ -373,6 +390,7 @@ struct ContentView: View {
                     .animation(.easeInOut(duration: 0.2), value: vm.taskQueue.isProcessing)
             }
         }
+        .focusedSceneValue(\.refreshIssuesAction, refreshAction)
         .background(WindowAccessor { window in
             // Use macOS native window frame autosave
             window.setFrameAutosaveName("MainWindow")
@@ -478,6 +496,13 @@ struct ContentView: View {
             }
         }
         // Copy / move to another repository
+        .sheet(item: $issueForLabels) { issue in
+            if let vm = viewModel.viewModel {
+                IssueLabelsSheet(issue: issue, viewModel: vm) {
+                    issueForLabels = nil
+                }
+            }
+        }
         .sheet(item: $transferRequest) { request in
             if let vm = viewModel.viewModel {
                 TransferIssuesSheet(

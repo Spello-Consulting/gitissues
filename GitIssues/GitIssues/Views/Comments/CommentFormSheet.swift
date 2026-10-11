@@ -98,6 +98,7 @@ struct CommentFormSheet: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
+                    .keyboardShortcut("s", modifiers: .command)
                     .disabled(viewModel.isSubmitting)
                 }
                 .padding()

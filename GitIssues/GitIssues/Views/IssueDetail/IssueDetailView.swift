@@ -21,7 +21,23 @@ struct IssueDetailView: View {
     @State private var showDeleteIssueConfirmation = false
     @State private var showAssignSheet = false
     @State private var isShareAnimating = false
+    @AppStorage(AppStateService.showIssueActivityKey) private var showActivity = true
     @State private var cancellables = Set<AnyCancellable>()
+
+    /// Opens the Add Comment window. Shared by the link at the top of the panel (next to the
+    /// issue author) and the one below the comments.
+    private func addComment() {
+        if let accessToken = authManager.getAccessToken() {
+            let windowData = CommentFormWindowData(
+                mode: .add,
+                accessToken: accessToken,
+                issueId: viewModel.issue.id,
+                issueState: viewModel.issue.state.rawValue
+            )
+            openWindow(id: WindowIdentifier.commentForm.rawValue, value: windowData)
+            activeCommentWindowId = windowData.id
+        }
+    }
 
     var body: some View {
         ScrollView {
@@ -95,33 +111,21 @@ struct IssueDetailView: View {
                 Divider()
 
                 // Issue body (with the hidden Kanban order marker stripped)
-                let renderedBody = KanbanOrderMarker.strip(from: viewModel.issue.body)
-                if !renderedBody.isEmpty {
-                    IssueBodyView(bodyText: renderedBody, author: viewModel.issue.author, apiService: viewModel.apiService)
-                } else {
-                    Text("No description provided")
-                        .foregroundColor(.secondary)
-                        .italic()
-                        .padding()
-                }
+                IssueBodyView(
+                    bodyText: KanbanOrderMarker.strip(from: viewModel.issue.body),
+                    author: viewModel.issue.author,
+                    apiService: viewModel.apiService,
+                    onAddComment: addComment
+                )
 
                 // Comments section
                 CommentsSection(
                     comments: viewModel.comments,
+                    activity: showActivity ? viewModel.activity : [],
+                    activityError: showActivity ? viewModel.activityError : nil,
                     isLoading: viewModel.isLoadingComments,
                     apiService: viewModel.apiService,
-                    onAddComment: {
-                        if let accessToken = authManager.getAccessToken() {
-                            let windowData = CommentFormWindowData(
-                                mode: .add,
-                                accessToken: accessToken,
-                                issueId: viewModel.issue.id,
-                                issueState: viewModel.issue.state.rawValue
-                            )
-                            openWindow(id: WindowIdentifier.commentForm.rawValue, value: windowData)
-                            activeCommentWindowId = windowData.id
-                        }
-                    },
+                    onAddComment: addComment,
                     onEditComment: { comment in
                         if let accessToken = authManager.getAccessToken() {
                             let commentData = CommentFormWindowData.CommentData(
@@ -196,6 +200,10 @@ struct IssueDetailView: View {
                     }
                 }
                 .store(in: &cancellables)
+        }
+        .onChange(of: showActivity) { _, _ in
+            // Fetch (or clear) the log when the setting is toggled while an issue is open.
+            Task { await viewModel.loadActivity() }
         }
         .alert("Delete Comment", isPresented: $showDeleteConfirmation) {
             Button("Cancel", role: .cancel) {
@@ -437,6 +445,7 @@ struct IssueBodyView: View {
     let bodyText: String
     let author: User?
     let apiService: GitHubAPIService
+    let onAddComment: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -450,6 +459,9 @@ struct IssueBodyView: View {
                     }
                 }
 
+                // Same action as the link below the comments, so long issues don't need a scroll.
+                AddCommentLink(action: onAddComment)
+
                 Spacer()
 
                 Text("Description")
@@ -457,19 +469,47 @@ struct IssueBodyView: View {
                     .foregroundColor(.secondary)
             }
 
-            // Use GitHub markdown rendering
-            MarkdownRenderView(markdown: bodyText, apiService: apiService)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding()
-                .background(Color(nsColor: .textBackgroundColor))
-                .cornerRadius(8)
+            if bodyText.isEmpty {
+                Text("No description provided")
+                    .foregroundColor(.secondary)
+                    .italic()
+                    .padding()
+            } else {
+                // Use GitHub markdown rendering
+                MarkdownRenderView(markdown: bodyText, apiService: apiService)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .cornerRadius(8)
+            }
         }
+    }
+}
+
+/// The "+ Add Comment" link, shown above the description and below the comments.
+struct AddCommentLink: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack {
+                Image(systemName: "plus.circle.fill")
+                    .foregroundColor(.accentColor)
+                Text("Add Comment")
+                    .font(.subheadline)
+            }
+        }
+        .buttonStyle(.plain)
     }
 }
 
 // MARK: - Comments Section
 struct CommentsSection: View {
     let comments: [Comment]
+    /// GitHub activity events to interleave with the comments (empty when the setting is off).
+    let activity: [IssueActivity]
+    /// Why the activity log couldn't be loaded, if it couldn't.
+    var activityError: String?
     let isLoading: Bool
     let apiService: GitHubAPIService
     let onAddComment: () -> Void
@@ -488,44 +528,106 @@ struct CommentsSection: View {
                     .foregroundColor(.secondary)
             }
 
+            if let activityError {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundColor(.orange)
+                    Text("Couldn't load the GitHub activity log: \(activityError)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             if isLoading {
                 ProgressView("Loading comments...")
                     .frame(maxWidth: .infinity)
                     .padding()
-            } else if comments.isEmpty {
-                Text("No comments yet")
-                    .foregroundColor(.secondary)
-                    .italic()
-                    .padding()
             } else {
-                ForEach(comments) { comment in
-                    CommentView(
-                        comment: comment,
-                        apiService: apiService,
-                        onEdit: {
-                            onEditComment(comment)
-                        },
-                        onDelete: {
-                            onDeleteComment(comment)
+                let entries = ConversationEntry.merge(comments: comments, activity: activity)
+                if entries.isEmpty {
+                    Text("No comments yet")
+                        .foregroundColor(.secondary)
+                        .italic()
+                        .padding()
+                } else {
+                    ForEach(entries) { entry in
+                        switch entry {
+                        case .comment(let comment):
+                            CommentView(
+                                comment: comment,
+                                apiService: apiService,
+                                onEdit: {
+                                    onEditComment(comment)
+                                },
+                                onDelete: {
+                                    onDeleteComment(comment)
+                                }
+                            )
+                        case .activity(let event):
+                            ActivityEventView(event: event)
                         }
-                    )
+                    }
                 }
             }
 
             // Add comment button
-            Button {
-                onAddComment()
-            } label: {
-                HStack {
-                    Image(systemName: "plus.circle.fill")
-                        .foregroundColor(.accentColor)
-                    Text("Add Comment")
-                        .font(.subheadline)
-                }
-            }
-            .buttonStyle(.plain)
-            .padding(.top, 8)
+            AddCommentLink(action: onAddComment)
+                .padding(.top, 8)
         }
+    }
+}
+
+// MARK: - Activity Event
+/// A compact one-line entry in the activity log, e.g. "alice closed this as completed · 2 days ago".
+struct ActivityEventView: View {
+    let event: IssueActivity
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: event.systemImage)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .frame(width: 18)
+
+            HStack(spacing: 4) {
+                Text(event.actor?.login ?? "Someone")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+
+                switch event.kind {
+                case .labeled(let label):
+                    Text("added the")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    LabelBadge(label: label)
+                    Text("label")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                case .unlabeled(let label):
+                    Text("removed the")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    LabelBadge(label: label)
+                    Text("label")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                default:
+                    Text(event.phrase)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                }
+
+                Text(event.createdAt, style: .relative)
+                    .font(.caption)
+                    .foregroundColor(.secondary.opacity(0.8))
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 2)
     }
 }
 

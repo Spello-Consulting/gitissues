@@ -135,9 +135,14 @@ class GraphQLClient {
         self.accessToken = accessToken
     }
 
+    /// Executes a GraphQL query and decodes `data`.
+    /// - Parameter tolerateErrors: When `true`, a response that carries both `errors` and usable
+    ///   `data` (GitHub reports e.g. an unreadable cross-referenced repository this way) is
+    ///   returned with the errors logged, instead of failing the whole request.
     func execute<T: Codable>(
         query: String,
-        variables: [String: Any]? = nil
+        variables: [String: Any]? = nil,
+        tolerateErrors: Bool = false
     ) async throws -> T {
         guard let url = URL(string: endpoint) else {
             throw GraphQLError.invalidURL
@@ -187,6 +192,10 @@ class GraphQLClient {
 
             if let errors = graphQLResponse.errors, !errors.isEmpty {
                 let errorMessages = errors.map { $0.message }
+                if tolerateErrors, let partial = graphQLResponse.data {
+                    AppLogger.shared.warning("GraphQL partial errors (using partial data): \(errorMessages.joined(separator: "; "))")
+                    return partial
+                }
                 AppLogger.shared.error("GraphQL errors: \(errorMessages.joined(separator: "; "))")
                 throw GraphQLError.graphQLErrors(errorMessages)
             }

@@ -479,6 +479,64 @@ class IssuesListViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Issue Labels
+
+    /// Fetches the labels a user can apply to issues in `repository` (Kanban labels excluded),
+    /// sorted by name.
+    func fetchEditableLabels(for repository: Repository) async throws -> [Label] {
+        let all = try await apiService.fetchAllRepositoryLabels(
+            owner: repository.owner.login,
+            repo: repository.name
+        )
+        return Kanban.visibleLabels(all)
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Creates a new label in `repository`.
+    func createLabel(in repository: Repository, name: String, color: String) async throws -> Label {
+        try await apiService.createLabel(repositoryId: repository.id, name: name, color: color)
+    }
+
+    /// Makes the issue's editable labels exactly `selected`, then updates the local cache.
+    /// Existing Kanban labels are left untouched.
+    func applyLabels(_ selected: [Label], to issue: Issue) async throws {
+        let changes = LabelSelection.changes(current: issue.labels, selectedIds: Set(selected.map(\.id)))
+        guard !changes.add.isEmpty || !changes.remove.isEmpty else { return }
+
+        if !changes.add.isEmpty {
+            try await apiService.addLabelsToIssue(issueId: issue.id, labelIds: changes.add)
+        }
+        if !changes.remove.isEmpty {
+            try await apiService.removeLabelsFromIssue(issueId: issue.id, labelIds: changes.remove)
+        }
+
+        // Pick up the server's `updatedAt`, but always use the labels we just applied — GitHub's
+        // read-after-write can briefly return the old set.
+        var base = issue
+        if let (refreshed, _) = try? await apiService.fetchIssueDetail(
+            owner: issue.repository.owner.login,
+            repo: issue.repository.name,
+            number: issue.number
+        ) {
+            base = refreshed
+        }
+        let updated = Issue(
+            id: base.id,
+            number: base.number,
+            title: base.title,
+            body: base.body,
+            state: base.state,
+            createdAt: base.createdAt,
+            updatedAt: base.updatedAt,
+            repository: base.repository,
+            labels: LabelSelection.resulting(current: issue.labels, selected: selected),
+            assignees: base.assignees,
+            author: base.author
+        )
+        upsertIssueInCache(updated)
+        AppLogger.shared.info("Updated labels for issue #\(issue.number) (+\(changes.add.count) / -\(changes.remove.count))")
+    }
+
     // MARK: - Cross-Repository Transfer
 
     /// Fetches all repositories the user can transfer issues into.
