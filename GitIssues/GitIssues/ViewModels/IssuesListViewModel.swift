@@ -30,6 +30,11 @@ class IssuesListViewModel: ObservableObject {
     // Track mutations that are ahead of any in-flight background sync
     private var pendingDeletions: Set<String> = []
     private var pendingInsertions: [Issue] = []
+    /// Local edits that an in-flight or very recent sync may not reflect yet (issue #100).
+    private var pendingUpdates: [String: PendingIssueUpdate] = [:]
+    /// Monotonic ids for list fetches, so a slow response can't clobber a newer one.
+    private var fetchSequence = 0
+    private var lastAppliedFetchSequence = 0
 
     init(accessToken: String) {
         self.apiService = GitHubAPIService(accessToken: accessToken)
@@ -91,9 +96,8 @@ class IssuesListViewModel: ObservableObject {
             }
 
             // Fetch all issues regardless of state/visibility — filtering is done client-side
-            let issues = try await apiService.fetchAllIssues()
-            applyIssuesFromSync(issues)
-            AppLogger.shared.info("Loaded \(issues.count) issues from GitHub")
+            let count = try await fetchAndApplyIssues()
+            AppLogger.shared.info("Loaded \(count) issues from GitHub")
         } catch {
             AppLogger.shared.error("Failed to load issues: \(error.localizedDescription)")
             self.errorMessage = error.localizedDescription
@@ -134,16 +138,35 @@ class IssuesListViewModel: ObservableObject {
             if viewerLogin == nil {
                 viewerLogin = try await apiService.fetchViewerLogin()
             }
-            let issues = try await apiService.fetchAllIssues()
-            applyIssuesFromSync(issues)
+            _ = try await fetchAndApplyIssues()
         } catch {
             // Silent sync — don't surface transient errors
         }
     }
 
+    /// Fetches all issues and merges them into the cache. Returns the number of issues fetched.
+    ///
+    /// The fetch is stamped with its start time and a sequence number so the merge can tell
+    /// whether the response predates a local edit (see `IssueSyncMerger`), and so a response that
+    /// arrives after a newer fetch has already been applied is discarded rather than rolling the
+    /// list back.
+    private func fetchAndApplyIssues() async throws -> Int {
+        fetchSequence += 1
+        let sequence = fetchSequence
+        let startedAt = Date()
+
+        let issues = try await apiService.fetchAllIssues()
+
+        guard sequence > lastAppliedFetchSequence else { return issues.count }
+        lastAppliedFetchSequence = sequence
+        applyIssuesFromSync(issues, fetchStartedAt: startedAt)
+        return issues.count
+    }
+
     /// Merges API-returned issues with any pending local mutations that may have raced ahead
-    /// of an in-flight sync: re-injects unconfirmed insertions and filters out pending deletions.
-    private func applyIssuesFromSync(_ issues: [Issue]) {
+    /// of an in-flight sync: re-injects unconfirmed insertions, filters out pending deletions,
+    /// and keeps locally-edited issues that the response doesn't reflect yet.
+    private func applyIssuesFromSync(_ issues: [Issue], fetchStartedAt: Date) {
         let incomingIDs = Set(issues.map { $0.id })
 
         // Confirmed absent → deletion acknowledged, stop filtering
@@ -151,7 +174,12 @@ class IssuesListViewModel: ObservableObject {
         // Confirmed present → insertion acknowledged, stop prepending
         pendingInsertions = pendingInsertions.filter { !incomingIDs.contains($0.id) }
 
-        let filtered = issues.filter { !pendingDeletions.contains($0.id) }
+        let merged = IssueSyncMerger.merge(
+            incoming: issues,
+            pending: &pendingUpdates,
+            fetchStartedAt: fetchStartedAt
+        )
+        let filtered = merged.filter { !pendingDeletions.contains($0.id) }
         allIssues = pendingInsertions + filtered
     }
 
@@ -160,8 +188,15 @@ class IssuesListViewModel: ObservableObject {
     /// Inserts or updates an issue in the local cache without a full reload.
     /// If the issue already exists it is updated in place; otherwise it is inserted at the front.
     func upsertIssueInCache(_ issue: Issue) {
+        // Protect this edit from any sync response that doesn't reflect it yet.
+        pendingUpdates[issue.id] = PendingIssueUpdate(issue: issue, appliedAt: Date())
+
         if let index = allIssues.firstIndex(where: { $0.id == issue.id }) {
             allIssues[index] = issue
+            // Keep an unconfirmed insertion's copy in step so a sync doesn't re-inject the old one.
+            if let pendingIndex = pendingInsertions.firstIndex(where: { $0.id == issue.id }) {
+                pendingInsertions[pendingIndex] = issue
+            }
         } else {
             allIssues.insert(issue, at: 0)
             pendingInsertions.insert(issue, at: 0)
@@ -172,6 +207,7 @@ class IssuesListViewModel: ObservableObject {
     func removeIssueFromCache(id: String) {
         allIssues.removeAll { $0.id == id }
         pendingInsertions.removeAll { $0.id == id }
+        pendingUpdates[id] = nil
         pendingDeletions.insert(id)
     }
 
@@ -566,7 +602,7 @@ class IssuesListViewModel: ObservableObject {
         let repos = allIssues.map { $0.repository }
         let uniqueRepos = Dictionary(grouping: repos, by: { $0.id })
             .compactMap { $0.value.first }
-        return uniqueRepos.sorted { $0.fullName < $1.fullName }
+        return uniqueRepos.sortedByName()
     }
 
     /// Updates the state filter (client-side; no API call needed)

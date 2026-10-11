@@ -64,3 +64,15 @@ struct Repository: Codable, Identifiable, Hashable {
         viewerPermission = try container.decodeIfPresent(String.self, forKey: .viewerPermission)
     }
 }
+
+extension Array where Element == Repository {
+    /// Sorted by repository name, case-insensitively — the same order as the Copy/Move destination
+    /// picker (GitHub's `NAME` ordering). `fullName` breaks ties between same-named repos.
+    func sortedByName() -> [Repository] {
+        sorted {
+            let byName = $0.name.localizedCaseInsensitiveCompare($1.name)
+            if byName != .orderedSame { return byName == .orderedAscending }
+            return $0.fullName.localizedCaseInsensitiveCompare($1.fullName) == .orderedAscending
+        }
+    }
+}
