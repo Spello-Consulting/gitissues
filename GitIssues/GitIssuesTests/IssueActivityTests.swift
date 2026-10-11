@@ -132,3 +132,12 @@ final class IssueActivityDecodingResilienceTests: XCTestCase {
         XCTAssertNil(events[1].actor, "A deleted user (null actor) is shown as 'Someone', not an error")
     }
 }
+
+@MainActor
+final class IssueActivityQueryScopeTests: XCTestCase {
+    /// The app's OAuth token only has `repo` + `read:user`. Selecting `Organization.login` needs
+    /// `read:org` and makes GitHub reject the entire query for such tokens.
+    func testActivityQueryDoesNotRequireReadOrgScope() {
+        XCTAssertFalse(GraphQLQueries.issueActivityQuery.contains("on Organization"))
+    }
+}

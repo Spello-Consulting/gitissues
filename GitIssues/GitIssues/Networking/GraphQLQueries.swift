@@ -145,6 +145,9 @@ struct GraphQLQueries {
     /// Query to fetch an issue's activity log (labels, close/reopen, assignment, renames, ...).
     /// Comments are excluded — they come from `issueDetailQuery`. Fetched separately so a problem
     /// with the log can never prevent the issue itself from loading.
+    ///
+    /// Must not select `Organization.login`: GitHub requires the `read:org` scope for it, which
+    /// the app deliberately doesn't request (only `repo` and `read:user`).
     static let issueActivityQuery = """
     query IssueActivity($owner: String!, $repo: String!, $number: Int!) {
       repository(owner: $owner, name: $repo) {
@@ -156,8 +159,8 @@ struct GraphQLQueries {
               ... on UnlabeledEvent { id createdAt actor { login avatarUrl } label { id name color } }
               ... on ClosedEvent { id createdAt actor { login avatarUrl } stateReason }
               ... on ReopenedEvent { id createdAt actor { login avatarUrl } }
-              ... on AssignedEvent { id createdAt actor { login avatarUrl } assignee { ... on User { login } ... on Bot { login } ... on Mannequin { login } ... on Organization { login } } }
-              ... on UnassignedEvent { id createdAt actor { login avatarUrl } assignee { ... on User { login } ... on Bot { login } ... on Mannequin { login } ... on Organization { login } } }
+              ... on AssignedEvent { id createdAt actor { login avatarUrl } assignee { ... on User { login } ... on Bot { login } ... on Mannequin { login } } }
+              ... on UnassignedEvent { id createdAt actor { login avatarUrl } assignee { ... on User { login } ... on Bot { login } ... on Mannequin { login } } }
               ... on RenamedTitleEvent { id createdAt actor { login avatarUrl } previousTitle currentTitle }
               ... on MilestonedEvent { id createdAt actor { login avatarUrl } milestoneTitle }
               ... on DemilestonedEvent { id createdAt actor { login avatarUrl } milestoneTitle }
