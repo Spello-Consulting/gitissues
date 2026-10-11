@@ -15,6 +15,8 @@ class IssueDetailViewModel: ObservableObject {
     @Published var comments: [Comment] = []
     /// GitHub activity log (labels, close/reopen, ...). Empty when the setting is off.
     @Published var activity: [IssueActivity] = []
+    /// Set when the activity log couldn't be loaded, so the panel can say so.
+    @Published var activityError: String?
     @Published var isLoadingComments = false
     @Published var errorMessage: String?
     @Published var isPinned: Bool
@@ -51,11 +53,7 @@ class IssueDetailViewModel: ObservableObject {
             )
 
             self.issue = updatedIssue
-            if let events = await fetchedActivity {
-                self.activity = events
-            } else if !AppStateService.showIssueActivity {
-                self.activity = []
-            }
+            applyActivity(await fetchedActivity)
 
             // Work around eventual consistency: if we previously had comments and the fetch returns empty,
             // keep existing comments and retry once after a short delay.
@@ -77,28 +75,41 @@ class IssueDetailViewModel: ObservableObject {
 
     /// Fetches the activity log if the setting is on. Returns `nil` when disabled or on failure,
     /// so callers keep whatever they already have.
-    private func fetchActivityIfEnabled() async -> [IssueActivity]? {
+    private func fetchActivityIfEnabled() async -> Result<[IssueActivity], Error>? {
         guard AppStateService.showIssueActivity else { return nil }
         do {
-            return try await apiService.fetchIssueActivity(
+            let events = try await apiService.fetchIssueActivity(
                 owner: issue.repository.owner.login,
                 repo: issue.repository.name,
                 number: issue.number
             )
+            AppLogger.shared.info("Loaded \(events.count) activity event(s) for #\(issue.number)")
+            return .success(events)
         } catch {
             AppLogger.shared.error("Failed to load activity for #\(issue.number): \(error.localizedDescription)")
-            return nil
+            return .failure(error)
+        }
+    }
+
+    /// Applies a fetch result: `nil` means the setting is off (clear), a failure keeps whatever
+    /// was already loaded and records the error for display.
+    private func applyActivity(_ result: Result<[IssueActivity], Error>?) {
+        switch result {
+        case .none:
+            activity = []
+            activityError = nil
+        case .success(let events):
+            activity = events
+            activityError = nil
+        case .failure(let error):
+            activityError = error.localizedDescription
         }
     }
 
     /// Loads (or clears, if the setting is now off) the activity log on its own, e.g. when the
     /// user turns the setting on while an issue is open.
     func loadActivity() async {
-        if let events = await fetchActivityIfEnabled() {
-            activity = events
-        } else if !AppStateService.showIssueActivity {
-            activity = []
-        }
+        applyActivity(await fetchActivityIfEnabled())
     }
 
     /// Toggles the pin state for this issue

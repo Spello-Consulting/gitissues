@@ -605,6 +605,33 @@ struct IssueActivityResponse: Codable {
 
     struct TimelineItems: Codable {
         let nodes: [TimelineNode]
+
+        enum CodingKeys: String, CodingKey {
+            case nodes
+        }
+
+        /// Decodes each node independently, skipping `null`s and any node that fails to decode,
+        /// so one odd event can't blank the whole activity log.
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            var list = try container.nestedUnkeyedContainer(forKey: .nodes)
+            var decoded: [TimelineNode] = []
+            while !list.isAtEnd {
+                if let node = try? list.decode(TimelineNode.self) {
+                    decoded.append(node)
+                } else {
+                    // A failed decode doesn't advance the container; consume the element.
+                    _ = try? list.decode(SkippedElement.self)
+                }
+            }
+            nodes = decoded
+        }
+    }
+
+    /// Placeholder used to step over an element that could not be decoded.
+    private struct SkippedElement: Codable {
+        init(from decoder: Decoder) throws {}
+        func encode(to encoder: Encoder) throws {}
     }
 
     struct ActorNode: Codable {

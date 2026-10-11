@@ -122,6 +122,7 @@ struct IssueDetailView: View {
                 CommentsSection(
                     comments: viewModel.comments,
                     activity: showActivity ? viewModel.activity : [],
+                    activityError: showActivity ? viewModel.activityError : nil,
                     isLoading: viewModel.isLoadingComments,
                     apiService: viewModel.apiService,
                     onAddComment: addComment,
@@ -507,6 +508,8 @@ struct CommentsSection: View {
     let comments: [Comment]
     /// GitHub activity events to interleave with the comments (empty when the setting is off).
     let activity: [IssueActivity]
+    /// Why the activity log couldn't be loaded, if it couldn't.
+    var activityError: String?
     let isLoading: Bool
     let apiService: GitHubAPIService
     let onAddComment: () -> Void
@@ -523,6 +526,17 @@ struct CommentsSection: View {
                 Text("(\(comments.count))")
                     .font(.headline)
                     .foregroundColor(.secondary)
+            }
+
+            if let activityError {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundColor(.orange)
+                    Text("Couldn't load the GitHub activity log: \(activityError)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             if isLoading {

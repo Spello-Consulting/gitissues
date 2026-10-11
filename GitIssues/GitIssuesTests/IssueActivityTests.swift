@@ -108,3 +108,27 @@ final class IssueActivityTests: XCTestCase {
         XCTAssertEqual(merged.map(\.id), ["comment-c", "activity-a"])
     }
 }
+
+// MARK: - Resilience
+
+@MainActor
+final class IssueActivityDecodingResilienceTests: XCTestCase {
+    func testNullAndMalformedNodesAreSkippedNotFatal() throws {
+        let json = """
+        {"repository":{"issue":{"timelineItems":{"nodes":[
+          {"__typename":"ReopenedEvent","id":"1","createdAt":"2026-10-11T07:23:43Z","actor":{"login":"nick","avatarUrl":null}},
+          null,
+          {"__typename":"LabeledEvent","id":"2","createdAt":"not a date","actor":{"login":"nick"}},
+          {"__typename":"ClosedEvent","id":"3","createdAt":"2026-10-11T07:33:10Z","actor":null,"stateReason":"COMPLETED"}
+        ]}}}}
+        """
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        let response = try decoder.decode(IssueActivityResponse.self, from: Data(json.utf8))
+        let events = response.repository.issue.timelineItems.nodes.compactMap { $0.toActivity() }
+
+        XCTAssertEqual(events.map(\.id), ["1", "3"])
+        XCTAssertNil(events[1].actor, "A deleted user (null actor) is shown as 'Someone', not an error")
+    }
+}

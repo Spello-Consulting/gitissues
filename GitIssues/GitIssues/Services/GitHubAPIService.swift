@@ -173,9 +173,11 @@ class GitHubAPIService {
             "number": number
         ]
 
+        // The log is supplementary: one event we can't read must not hide all the others.
         let response: IssueActivityResponse = try await graphQLClient.execute(
             query: GraphQLQueries.issueActivityQuery,
-            variables: variables
+            variables: variables,
+            tolerateErrors: true
         )
 
         return response.repository.issue.timelineItems.nodes
