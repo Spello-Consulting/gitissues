@@ -45,6 +45,28 @@ enum Kanban {
         labels.filter { !isKanbanLabel($0.name) }
     }
 
+    /// Determines which of `states` (ordered; first is the open default, one is closed) an issue
+    /// belongs to.
+    ///
+    /// - Closed on GitHub → always the closed state; GitHub's close state overrides any Kanban label
+    ///   (e.g. a stale `kanban-In Progress` left on an issue closed outside GitIssues).
+    /// - Open with exactly one configured Kanban label present → that state.
+    /// - Open with no configured label → the default state.
+    /// - Open with more than one configured label → the default state (they get cleaned up on the
+    ///   next move).
+    ///
+    /// Unconfigured `kanban-*` labels (another user's flow) are ignored entirely.
+    static func state(for issue: Issue, in states: [KanbanState], closedState: KanbanState, defaultState: KanbanState) -> KanbanState {
+        if issue.state == .closed {
+            return closedState
+        }
+        let present = states.filter { state in
+            let name = labelName(for: state).lowercased()
+            return issue.labels.contains { $0.name.lowercased() == name }
+        }
+        return present.count == 1 ? present[0] : defaultState
+    }
+
     /// Palette used when auto-creating Kanban labels, cycled by column index.
     static let palette = ["1f6feb", "8250df", "d29922", "1a7f37", "cf222e", "6e7781"]
 

@@ -72,21 +72,9 @@ final class KanbanSettingsService: ObservableObject {
 
     // MARK: - Placement
 
-    /// Determines which column an issue belongs to.
-    ///
-    /// - Exactly one managed Kanban label present → that state.
-    /// - No managed label → the default (open) state or the closed state, by the issue's open/closed state.
-    /// - More than one managed label → the default state (they get cleaned up on the next move).
-    ///
-    /// Unmanaged `kanban-*` labels (another user's flow) are ignored entirely.
+    /// Determines which column an issue belongs to. See `Kanban.state(for:in:closedState:defaultState:)`
+    /// for the placement rules.
     func state(for issue: Issue) -> KanbanState {
-        let present = states.filter { state in
-            let name = Kanban.labelName(for: state).lowercased()
-            return issue.labels.contains { $0.name.lowercased() == name }
-        }
-        if present.count == 1 {
-            return present[0]
-        }
-        return issue.state == .open ? defaultState : closedState
+        Kanban.state(for: issue, in: states, closedState: closedState, defaultState: defaultState)
     }
 }

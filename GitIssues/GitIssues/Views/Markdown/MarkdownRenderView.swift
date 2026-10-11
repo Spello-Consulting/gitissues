@@ -63,6 +63,11 @@ struct MarkdownRenderView: View {
         <head>
             <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
             <style>
+                html {
+                    /* The host SwiftUI view sizes the web view to its full content height, so the
+                       page itself must never scroll vertically. */
+                    overflow-y: hidden;
+                }
                 body {
                     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
                     font-size: 14px;
@@ -70,6 +75,9 @@ struct MarkdownRenderView: View {
                     color: #24292e;
                     padding: 0;
                     margin: 0;
+                    /* Establish a block formatting context so the first/last child's margins stay
+                       inside <body> and are included in the measured content height. */
+                    display: flow-root;
                 }
                 html.dark body {
                     color: #c9d1d9;
@@ -212,22 +220,80 @@ struct MarkdownRenderView: View {
     }
 }
 
+/// `WKWebView` that hands vertical scroll-wheel / trackpad events to the enclosing scroll view.
+///
+/// The web view is sized to its full content height, so it never has anything of its own to scroll
+/// vertically. Without this, the web view swallows wheel events while the pointer is over it and
+/// the surrounding detail panel stops scrolling. Horizontal gestures stay with the web view so wide
+/// tables and code blocks can still be panned.
+final class PassthroughScrollWebView: WKWebView {
+    /// Whether the in-flight scroll gesture is being forwarded to the parent. Decided once at the
+    /// start of each gesture so a gesture (and its momentum) is never split between two views.
+    private var forwardsToParent = true
+
+    override func scrollWheel(with event: NSEvent) {
+        let startsGesture = event.phase.contains(.began)
+        let isDiscreteWheel = event.phase.isEmpty && event.momentumPhase.isEmpty
+        if startsGesture || isDiscreteWheel {
+            forwardsToParent = abs(event.scrollingDeltaY) >= abs(event.scrollingDeltaX)
+        }
+
+        if forwardsToParent, let next = nextResponder {
+            next.scrollWheel(with: event)
+        } else {
+            super.scrollWheel(with: event)
+        }
+    }
+}
+
 /// WKWebView wrapper for displaying HTML with auto-height
 struct MarkdownWebView: NSViewRepresentable {
     let html: String
     @Binding var contentHeight: CGFloat
 
+    /// Name of the script message handler the page uses to report its content height.
+    private static let heightMessageName = "contentHeight"
+
+    /// Reports the rendered height of `<body>` whenever it changes (initial layout, images
+    /// finishing loading, the panel being resized and the text re-wrapping, ...).
+    private static let heightScript = """
+    (function () {
+        var last = -1;
+        function report() {
+            var h = Math.ceil(document.body.getBoundingClientRect().height);
+            if (h !== last) {
+                last = h;
+                window.webkit.messageHandlers.\(heightMessageName).postMessage(h);
+            }
+        }
+        new ResizeObserver(report).observe(document.body);
+        window.addEventListener('load', report);
+        report();
+    })();
+    """
+
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
-        let webView = WKWebView(frame: .zero, configuration: config)
+        let userScript = WKUserScript(
+            source: Self.heightScript,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true
+        )
+        config.userContentController.addUserScript(userScript)
+        config.userContentController.add(context.coordinator, name: Self.heightMessageName)
+
+        let webView = PassthroughScrollWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground") // Transparent background
-        webView.navigationDelegate = context.coordinator
 
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.contentHeight = $contentHeight
+        // Only reload when the HTML actually changed; reloading on every SwiftUI update would
+        // flicker and reset the height measurement.
+        guard context.coordinator.loadedHTML != html else { return }
+        context.coordinator.loadedHTML = html
         webView.loadHTMLString(html, baseURL: nil)
     }
 
@@ -235,22 +301,23 @@ struct MarkdownWebView: NSViewRepresentable {
         Coordinator(contentHeight: $contentHeight)
     }
 
-    class Coordinator: NSObject, WKNavigationDelegate {
+    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: heightMessageName)
+    }
+
+    class Coordinator: NSObject, WKScriptMessageHandler {
         var contentHeight: Binding<CGFloat>
+        var loadedHTML: String?
 
         init(contentHeight: Binding<CGFloat>) {
             self.contentHeight = contentHeight
         }
 
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            // Calculate content height after page loads
-            webView.evaluateJavaScript("document.body.scrollHeight") { result, error in
-                if let height = result as? CGFloat {
-                    DispatchQueue.main.async {
-                        // Add 35px buffer to prevent content cutoff
-                        self.contentHeight.wrappedValue = max(height + 35, 60)
-                    }
-                }
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard let height = (message.body as? NSNumber).map({ CGFloat(truncating: $0) }) else { return }
+            let newHeight = max(height, 40)
+            if abs(contentHeight.wrappedValue - newHeight) >= 0.5 {
+                contentHeight.wrappedValue = newHeight
             }
         }
     }

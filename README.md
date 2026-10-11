@@ -16,6 +16,14 @@ The first time you run the app you'll see a Connect to GitHub screen. Click the 
 
 By default, GitIssues only requests access to public repos (that you own or are collaborating on). If you also want to edit issues in your private repos, go the GitIssues > Settings... and turn on _Allow private repository access_. Your will be taken through the GitHub authorisation process again.
 
+## Running the tests
+
+The unit tests live in the `GitIssuesTests` target. Run them from Xcode (Product > Test, or ⌘U), or from the command line:
+
+```bash
+xcodebuild test -project GitIssues/GitIssues.xcodeproj -scheme GitIssues -destination 'platform=macOS'
+```
+
 ## Known Limitations
 
 - Some performance enhancements may be warranted for users with a large number of issues.
