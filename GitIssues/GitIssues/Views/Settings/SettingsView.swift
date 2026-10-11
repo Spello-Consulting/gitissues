@@ -28,7 +28,7 @@ struct SettingsView: View {
                     SwiftUI.Label("Logging", systemImage: "doc.text.magnifyingglass")
                 }
         }
-        .frame(width: 540, height: 480)
+        .frame(width: 540, height: 560)
     }
 }
 
@@ -39,6 +39,7 @@ struct GeneralSettingsView: View {
     @AppStorage(AppStateService.syncEnabledKey) private var syncEnabled = true
     @AppStorage(AppStateService.syncIntervalSecondsKey) private var syncIntervalSeconds = 30
     @AppStorage(AppStateService.allowReadOnlyRepoAccessKey) private var allowReadOnlyRepoAccess = false
+    @AppStorage(AppStateService.showIssueActivityKey) private var showIssueActivity = true
 
     private static let intervalOptions = [10, 15, 30, 60, 120, 300]
 
@@ -86,6 +87,21 @@ struct GeneralSettingsView: View {
                     }
 
                     Text("When enabled, issues are refreshed in the background at the chosen interval.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Divider()
+
+                // Issue Detail Section
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Issue Detail")
+                        .font(.headline)
+
+                    Toggle("Show GitHub activity log", isOn: $showIssueActivity)
+
+                    Text("When enabled, label, assignment, open/close and rename events are listed in line with the comments in the issue detail panel.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

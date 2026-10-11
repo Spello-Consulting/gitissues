@@ -81,9 +81,20 @@ struct MainAppView: View {
 /// Backed by `@AppStorage("kanbanViewEnabled")`, which `ContentView` also reads.
 struct ViewCommands: Commands {
     @AppStorage("kanbanViewEnabled") private var kanbanViewEnabled = false
+    /// Published by the main window; `nil` (command disabled) when another window has focus or a
+    /// refresh is already running.
+    @FocusedValue(\.refreshIssuesAction) private var refreshIssues
 
     var body: some Commands {
         CommandMenu("View") {
+            Button("Refresh Issues") {
+                refreshIssues?()
+            }
+            .keyboardShortcut("r", modifiers: .command)
+            .disabled(refreshIssues == nil)
+
+            Divider()
+
             // Two toggles acting as a radio group so each shows a checkmark when active.
             Toggle(isOn: Binding(
                 get: { !kanbanViewEnabled },

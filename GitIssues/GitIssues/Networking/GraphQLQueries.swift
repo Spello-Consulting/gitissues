@@ -142,6 +142,36 @@ struct GraphQLQueries {
     }
     """
 
+    /// Query to fetch an issue's activity log (labels, close/reopen, assignment, renames, ...).
+    /// Comments are excluded — they come from `issueDetailQuery`. Fetched separately so a problem
+    /// with the log can never prevent the issue itself from loading.
+    static let issueActivityQuery = """
+    query IssueActivity($owner: String!, $repo: String!, $number: Int!) {
+      repository(owner: $owner, name: $repo) {
+        issue(number: $number) {
+          timelineItems(first: 100, itemTypes: [LABELED_EVENT, UNLABELED_EVENT, CLOSED_EVENT, REOPENED_EVENT, ASSIGNED_EVENT, UNASSIGNED_EVENT, RENAMED_TITLE_EVENT, MILESTONED_EVENT, DEMILESTONED_EVENT, LOCKED_EVENT, UNLOCKED_EVENT, CROSS_REFERENCED_EVENT, TRANSFERRED_EVENT]) {
+            nodes {
+              __typename
+              ... on LabeledEvent { id createdAt actor { login avatarUrl } label { id name color } }
+              ... on UnlabeledEvent { id createdAt actor { login avatarUrl } label { id name color } }
+              ... on ClosedEvent { id createdAt actor { login avatarUrl } stateReason }
+              ... on ReopenedEvent { id createdAt actor { login avatarUrl } }
+              ... on AssignedEvent { id createdAt actor { login avatarUrl } assignee { ... on User { login } ... on Bot { login } ... on Mannequin { login } ... on Organization { login } } }
+              ... on UnassignedEvent { id createdAt actor { login avatarUrl } assignee { ... on User { login } ... on Bot { login } ... on Mannequin { login } ... on Organization { login } } }
+              ... on RenamedTitleEvent { id createdAt actor { login avatarUrl } previousTitle currentTitle }
+              ... on MilestonedEvent { id createdAt actor { login avatarUrl } milestoneTitle }
+              ... on DemilestonedEvent { id createdAt actor { login avatarUrl } milestoneTitle }
+              ... on LockedEvent { id createdAt actor { login avatarUrl } lockReason }
+              ... on UnlockedEvent { id createdAt actor { login avatarUrl } }
+              ... on CrossReferencedEvent { id createdAt actor { login avatarUrl } source { __typename ... on Issue { number title repository { nameWithOwner } } ... on PullRequest { number title repository { nameWithOwner } } } }
+              ... on TransferredEvent { id createdAt actor { login avatarUrl } fromRepository { nameWithOwner } }
+            }
+          }
+        }
+      }
+    }
+    """
+
     /// Query to fetch all repositories the user can open issues in, including those
     /// owned by organisations they belong to.
     static let repositoriesQuery = """
@@ -557,6 +587,131 @@ struct AllIssuesResponse: Codable {
 
         func toUser() -> User {
             User(id: id, login: login, avatarUrl: avatarUrl)
+        }
+    }
+}
+
+// Response structure for the issue activity (timeline) query
+struct IssueActivityResponse: Codable {
+    let repository: RepositoryNode
+
+    struct RepositoryNode: Codable {
+        let issue: IssueNode
+    }
+
+    struct IssueNode: Codable {
+        let timelineItems: TimelineItems
+    }
+
+    struct TimelineItems: Codable {
+        let nodes: [TimelineNode]
+    }
+
+    struct ActorNode: Codable {
+        let login: String
+        let avatarUrl: String?
+    }
+
+    struct LoginNode: Codable {
+        let login: String?
+    }
+
+    struct NameWithOwnerNode: Codable {
+        let nameWithOwner: String?
+    }
+
+    struct LabelNode: Codable {
+        let id: String
+        let name: String
+        let color: String
+    }
+
+    struct SourceNode: Codable {
+        let typename: String?
+        let number: Int?
+        let title: String?
+        let repository: NameWithOwnerNode?
+
+        enum CodingKeys: String, CodingKey {
+            case typename = "__typename"
+            case number, title, repository
+        }
+    }
+
+    /// One polymorphic timeline node. Every field except `__typename` is optional because which
+    /// ones are present depends on the event type.
+    struct TimelineNode: Codable {
+        let typename: String
+        let id: String?
+        let createdAt: Date?
+        let actor: ActorNode?
+        let label: LabelNode?
+        let stateReason: String?
+        let assignee: LoginNode?
+        let previousTitle: String?
+        let currentTitle: String?
+        let milestoneTitle: String?
+        let lockReason: String?
+        let source: SourceNode?
+        let fromRepository: NameWithOwnerNode?
+
+        enum CodingKeys: String, CodingKey {
+            case typename = "__typename"
+            case id, createdAt, actor, label, stateReason, assignee, previousTitle, currentTitle
+            case milestoneTitle, lockReason, source, fromRepository
+        }
+
+        /// Converts to a domain event, or nil for node types / shapes we don't display.
+        func toActivity() -> IssueActivity? {
+            guard let id, let createdAt else { return nil }
+
+            let kind: IssueActivity.Kind
+            switch typename {
+            case "LabeledEvent":
+                guard let label else { return nil }
+                kind = .labeled(Label(id: label.id, name: label.name, color: label.color))
+            case "UnlabeledEvent":
+                guard let label else { return nil }
+                kind = .unlabeled(Label(id: label.id, name: label.name, color: label.color))
+            case "ClosedEvent":
+                kind = .closed(reason: stateReason)
+            case "ReopenedEvent":
+                kind = .reopened
+            case "AssignedEvent":
+                kind = .assigned(login: assignee?.login)
+            case "UnassignedEvent":
+                kind = .unassigned(login: assignee?.login)
+            case "RenamedTitleEvent":
+                guard let previousTitle, let currentTitle else { return nil }
+                kind = .renamed(from: previousTitle, to: currentTitle)
+            case "MilestonedEvent":
+                kind = .milestoned(title: milestoneTitle ?? "")
+            case "DemilestonedEvent":
+                kind = .demilestoned(title: milestoneTitle ?? "")
+            case "LockedEvent":
+                kind = .locked(reason: lockReason)
+            case "UnlockedEvent":
+                kind = .unlocked
+            case "CrossReferencedEvent":
+                guard let number = source?.number, let title = source?.title else { return nil }
+                kind = .crossReferenced(
+                    number: number,
+                    title: title,
+                    repository: source?.repository?.nameWithOwner,
+                    isPullRequest: source?.typename == "PullRequest"
+                )
+            case "TransferredEvent":
+                kind = .transferred(from: fromRepository?.nameWithOwner)
+            default:
+                return nil
+            }
+
+            return IssueActivity(
+                id: id,
+                actor: actor.map { IssueActivity.Actor(login: $0.login, avatarUrl: $0.avatarUrl) },
+                createdAt: createdAt,
+                kind: kind
+            )
         }
     }
 }

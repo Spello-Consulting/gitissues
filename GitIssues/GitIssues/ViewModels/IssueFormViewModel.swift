@@ -43,6 +43,17 @@ class IssueFormViewModel: ObservableObject {
     // Hidden Kanban order marker parsed out of the body on load, re-injected on save.
     private var originalOrderKey: String?
 
+    /// Repository of the most recently created or edited issue in this app session (issue #99).
+    /// Deliberately in-memory only: a fresh launch starts with no repository selected.
+    private static var lastUsedRepositoryId: String?
+
+    /// The repository to pre-select in the New Issue form: the last-used repository, provided the
+    /// user can still create issues in it. `nil` leaves the picker blank.
+    static func defaultRepositoryId(lastUsed: String?, available: [Repository]) -> String? {
+        guard let lastUsed, available.contains(where: { $0.id == lastUsed }) else { return nil }
+        return lastUsed
+    }
+
     // Form mode
     enum IssueFormMode {
         case create
@@ -105,7 +116,20 @@ class IssueFormViewModel: ObservableObject {
         } catch {
             errorMessage = "Failed to load repositories: \(error.localizedDescription)"
         }
+
+        // Default to the repository used for the last created/edited issue (#99).
+        var preselected = false
+        if selectedRepositoryId == nil,
+           let defaultId = Self.defaultRepositoryId(lastUsed: Self.lastUsedRepositoryId, available: availableRepositories) {
+            selectedRepositoryId = defaultId
+            preselected = true
+        }
         isLoadingRepositories = false
+
+        // The picker's onChange only fires for user-driven changes, so load labels explicitly.
+        if preselected {
+            await loadLabels()
+        }
     }
 
     /// Loads labels for the selected repository
@@ -344,6 +368,14 @@ class IssueFormViewModel: ObservableObject {
                     )
                     issue = refreshed
                 }
+            }
+
+            // Remember the repository so the next New Issue form can default to it (#99).
+            let usedRepositoryId = issue.repository.id.isEmpty
+                ? (selectedRepositoryId ?? originalIssueData?.repositoryId)
+                : issue.repository.id
+            if let usedRepositoryId, !usedRepositoryId.isEmpty {
+                Self.lastUsedRepositoryId = usedRepositoryId
             }
 
             isSubmitting = false

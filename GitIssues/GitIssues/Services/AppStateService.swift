@@ -31,6 +31,7 @@ class AppStateService {
     static let syncEnabledKey = "syncEnabled"
     static let syncIntervalSecondsKey = "syncIntervalSeconds"
     static let allowReadOnlyRepoAccessKey = "allowReadOnlyRepoAccess"
+    static let showIssueActivityKey = "showIssueActivity"
 
     private let defaults = UserDefaults.standard
     private let appStateKey = "appState"
@@ -95,6 +96,14 @@ class AppStateService {
     /// Defaults to `false`, so read-only repos are hidden until the user opts in.
     static var allowReadOnlyRepoAccess: Bool {
         UserDefaults.standard.bool(forKey: allowReadOnlyRepoAccessKey)
+    }
+
+    /// Whether the issue detail panel lists GitHub's activity log alongside the comments.
+    /// Defaults to `true`.
+    static var showIssueActivity: Bool {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: showIssueActivityKey) == nil { return true }
+        return defaults.bool(forKey: showIssueActivityKey)
     }
 
     /// Loads filter state and converts back to FilterOptions
