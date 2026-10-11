@@ -52,14 +52,6 @@
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
-/* Begin PBXTargetDependency section */
-		0A1B2C3D4E5F60718293A4B7 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 018C5C822F203AE500B78046 /* GitIssues */;
-			targetProxy = 0A1B2C3D4E5F60718293A4B8 /* PBXContainerItemProxy */;
-		};
-/* End PBXTargetDependency section */
-
 /* Begin PBXFrameworksBuildPhase section */
 		018C5C802F203AE500B78046 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
@@ -247,6 +239,14 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		0A1B2C3D4E5F60718293A4B7 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 018C5C822F203AE500B78046 /* GitIssues */;
+			targetProxy = 0A1B2C3D4E5F60718293A4B8 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
 		018C5C8C2F203AE800B78046 /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -400,7 +400,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.1.0;
+				MARKETING_VERSION = 1.1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.spelloconsulting.gitissues;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -445,7 +445,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.1.0;
+				MARKETING_VERSION = 1.1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.spelloconsulting.gitissues;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
