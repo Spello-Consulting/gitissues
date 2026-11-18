@@ -1,7 +1,7 @@
 # Issue #109 — Performance Plan
 
-Status: **Phases 0–1 complete and measured (Phase 1 committed). Phase 2 (Kanban move) implemented, awaiting
-Release-build measurement. Phases 3–4 not started.**
+Status: **Phases 0–2 complete, measured and committed (a Kanban move is now 1.4–2.1 s, was 3.3–4.3 s). Phase 4
+implemented, awaiting measurement. Phase 3 (disk cache) not started.**
 Branch: `feature/issue-109-performance`
 
 ## 1. Problem
@@ -161,15 +161,22 @@ The optimistic UI and revert-on-failure behaviour are unchanged. Multi-card drag
    undecodable file is ignored and deleted.
 5. **Settings:** a "Clear local cache" button.
 
-### Phase 4 — Small CPU clean-up (low risk, cheap; now justified by §2.4 — do straight after Phase 2)
+### Phase 4 — Board CPU clean-up (justified by §2.4) — implemented, awaiting measurement
 
-1. Compile the order-marker regex once (`static let`) and compute `kanbanOrderKey` when the `Issue` is built
-   (stored, not `Codable`), instead of one regex compile + body scan per access in the board's sort/filter closures.
-2. Batch cache updates (`upsertIssuesInCache(_:)`) for multi-issue moves and copies so the list re-filters once.
+1. The order-marker regex is compiled once (`static let`) and skipped entirely for bodies that don't contain the
+   marker literal. `Issue.kanbanOrderKey` is now a stored property computed when the issue is created (excluded from
+   `Codable`; `Issue` has explicit `init`/`init(from:)`/`encode(to:)` to support it), instead of a regex compile and
+   full-body scan on every access from the board's filter, sort and neighbour-lookup closures.
+2. The board groups issues into columns in **one pass** per render (`Kanban.columns(for:in:…)`), instead of one pass
+   over the whole list per column, with each state's label name lowercased once. Placement is covered by a parity
+   test against the per-issue `Kanban.state(for:…)` rules.
 
-Everything else from the earlier CPU list (hash-by-id `Issue`, single-pass column grouping, off-main decode, search
-debounce) is **deferred** — it only matters on much larger lists, and none of it showed up in the numbers. Revisit if
-the app feels laggy with a large account.
+Success measure: `kanban board grouping` (replaces the per-column `kanban column 'Done'` lines, which were 20–35 ms
+each on 462 issues) should drop below the 10 ms logging threshold and so disappear from the info log.
+
+Deferred, because the data shows no need: batched `upsertIssuesInCache` (a single upsert measured 0.3–2.9 ms),
+hash-by-id `Issue`, off-main decoding (≤ 3 ms), search debounce. Revisit if the app feels laggy with a much larger
+account.
 
 ### Dropped
 

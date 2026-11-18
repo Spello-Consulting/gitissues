@@ -20,11 +20,13 @@ struct KanbanBoardView: View {
     @State private var selectionAnchor: Issue?
 
     var body: some View {
+        // Group once per render (one pass over the list), rather than once per column.
+        let columns = groupedColumns()
         HStack(spacing: 0) {
             ForEach(Array(settings.states.enumerated()), id: \.element.id) { index, state in
                 KanbanColumnView(
                     state: state,
-                    issues: issues(for: state),
+                    issues: columns[state.id] ?? [],
                     viewModel: viewModel,
                     selectedIssues: $selectedIssues,
                     selectionAnchor: $selectionAnchor,
@@ -54,21 +56,18 @@ struct KanbanBoardView: View {
         .animation(.default, value: viewModel.kanbanToastMessage)
     }
 
-    /// Issues for a column: those whose placement resolves to `state`. Manually-ordered issues
+    /// Issues per column: those whose placement resolves to that state. Manually-ordered issues
     /// (with an order key) come first, sorted by key; unkeyed issues follow in filtered order.
-    private func issues(for state: KanbanState) -> [Issue] {
+    private func groupedColumns() -> [UUID: [Issue]] {
         let timer = PerfTimer()
-        let inColumn = viewModel.filteredIssues.filter { settings.state(for: $0).id == state.id }
-        let keyed = inColumn
-            .filter { $0.kanbanOrderKey != nil }
-            .sorted { ($0.kanbanOrderKey ?? "") < ($1.kanbanOrderKey ?? "") }
-        let unkeyed = inColumn.filter { $0.kanbanOrderKey == nil }
-        PerfTimer.log(
-            "kanban column '\(state.name)'", timer,
-            "scanned=\(viewModel.filteredIssues.count) inColumn=\(inColumn.count)",
-            slowAfterMs: 10
+        let columns = Kanban.columns(
+            for: viewModel.filteredIssues,
+            in: settings.states,
+            closedState: settings.closedState,
+            defaultState: settings.defaultState
         )
-        return keyed + unkeyed
+        PerfTimer.log("kanban board grouping", timer, "issues=\(viewModel.filteredIssues.count)", slowAfterMs: 10)
+        return columns
     }
 }
 

@@ -67,6 +67,52 @@ enum Kanban {
         return present.count == 1 ? present[0] : defaultState
     }
 
+    /// Groups `issues` into board columns in a **single pass**, each column ordered for display:
+    /// manually-ordered issues (those with an order key) first, sorted by key, then unkeyed issues
+    /// in their incoming order.
+    ///
+    /// Placement is identical to calling `state(for:in:closedState:defaultState:)` per issue; this
+    /// just avoids doing it once per column per render (the board used to scan the full list
+    /// once for every column) and lowercases each state's label name once rather than per issue.
+    /// Every state in `states` has an entry, even if empty.
+    static func columns(
+        for issues: [Issue],
+        in states: [KanbanState],
+        closedState: KanbanState,
+        defaultState: KanbanState
+    ) -> [UUID: [Issue]] {
+        let stateLabels = states.map { (state: $0, label: labelName(for: $0).lowercased()) }
+
+        var keyed: [UUID: [Issue]] = [:]
+        var unkeyed: [UUID: [Issue]] = [:]
+        for issue in issues {
+            let target: KanbanState
+            if issue.state == .closed {
+                target = closedState
+            } else {
+                var match: KanbanState?
+                var matches = 0
+                for entry in stateLabels where issue.labels.contains(where: { $0.name.lowercased() == entry.label }) {
+                    match = entry.state
+                    matches += 1
+                }
+                target = matches == 1 ? (match ?? defaultState) : defaultState
+            }
+            if issue.kanbanOrderKey != nil {
+                keyed[target.id, default: []].append(issue)
+            } else {
+                unkeyed[target.id, default: []].append(issue)
+            }
+        }
+
+        var result: [UUID: [Issue]] = [:]
+        for state in states {
+            let sortedKeyed = (keyed[state.id] ?? []).sorted { ($0.kanbanOrderKey ?? "") < ($1.kanbanOrderKey ?? "") }
+            result[state.id] = sortedKeyed + (unkeyed[state.id] ?? [])
+        }
+        return result
+    }
+
     /// Palette used when auto-creating Kanban labels, cycled by column index.
     static let palette = ["1f6feb", "8250df", "d29922", "1a7f37", "cf222e", "6e7781"]
 
