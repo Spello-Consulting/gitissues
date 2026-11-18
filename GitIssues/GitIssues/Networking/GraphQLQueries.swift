@@ -142,6 +142,60 @@ struct GraphQLQueries {
     }
     """
 
+    /// Lightweight read of one issue for a read-modify-write (Kanban move): everything the list
+    /// query returns, but **all** labels (up to 100, so a label-set replacement can't drop any) and
+    /// **no comments** (the full detail query pulls 100 of them, which a move never needs).
+    static let issueForUpdateQuery = """
+    query IssueForUpdate($owner: String!, $repo: String!, $number: Int!) {
+      repository(owner: $owner, name: $repo) {
+        issue(number: $number) {
+          id
+          number
+          title
+          body
+          state
+          createdAt
+          updatedAt
+          repository {
+            id
+            name
+            owner {
+              id
+              login
+              avatarUrl
+            }
+            isPrivate
+            isArchived
+            viewerPermission
+          }
+          labels(first: 100) {
+            nodes {
+              id
+              name
+              color
+            }
+          }
+          assignees(first: 10) {
+            nodes {
+              ... on User {
+                id
+                login
+                avatarUrl
+              }
+            }
+          }
+          author {
+            ... on User {
+              id
+              login
+              avatarUrl
+            }
+          }
+        }
+      }
+    }
+    """
+
     /// Query to fetch an issue's activity log (labels, close/reopen, assignment, renames, ...).
     /// Comments are excluded — they come from `issueDetailQuery`. Fetched separately so a problem
     /// with the log can never prevent the issue itself from loading.
@@ -274,8 +328,8 @@ struct GraphQLQueries {
 
     /// Mutation to update an existing issue
     static let updateIssueMutation = """
-    mutation UpdateIssue($id: ID!, $title: String, $body: String, $state: IssueState) {
-      updateIssue(input: {id: $id, title: $title, body: $body, state: $state}) {
+    mutation UpdateIssue($id: ID!, $title: String, $body: String, $state: IssueState, $labelIds: [ID!]) {
+      updateIssue(input: {id: $id, title: $title, body: $body, state: $state, labelIds: $labelIds}) {
         issue {
           id
           number
@@ -1105,6 +1159,16 @@ struct UpdateIssueResponse: Codable {
 }
 
 // Response structure for add comment mutation
+/// Response of `GraphQLQueries.issueForUpdateQuery`. Shares its issue node type with the
+/// `updateIssue` mutation payload, since both select the same fields.
+struct IssueForUpdateResponse: Codable {
+    let repository: RepositoryNode
+
+    struct RepositoryNode: Codable {
+        let issue: UpdateIssueResponse.IssueNode
+    }
+}
+
 struct AddCommentResponse: Codable {
     let addComment: AddCommentPayload
 

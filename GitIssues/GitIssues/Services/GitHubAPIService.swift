@@ -17,6 +17,8 @@ class GitHubAPIService {
 
     private let graphQLClient: GraphQLClient
     private let accessToken: String
+    /// Per-repository label ids for Kanban moves (issue #109).
+    private var labelCache = RepositoryLabelCache()
 
     init(accessToken: String) {
         self.accessToken = accessToken
@@ -144,6 +146,16 @@ class GitHubAPIService {
         return (issue, comments)
     }
 
+    /// Reads one issue for a read-modify-write (e.g. a Kanban move): all its labels, no comments.
+    /// Roughly half the cost of `fetchIssueDetail`'s payload and enough for the move logic.
+    func fetchIssueForUpdate(owner: String, repo: String, number: Int) async throws -> Issue {
+        let response: IssueForUpdateResponse = try await graphQLClient.execute(
+            query: GraphQLQueries.issueForUpdateQuery,
+            variables: ["owner": owner, "repo": repo, "number": number]
+        )
+        return response.repository.issue.toIssue()
+    }
+
     /// Fetches an issue's activity log: label/assignee/state changes, renames, cross-references, ...
     /// Comments are not included. Events are returned oldest-first.
     func fetchIssueActivity(owner: String, repo: String, number: Int) async throws -> [IssueActivity] {
@@ -222,9 +234,16 @@ class GitHubAPIService {
         issueId: String,
         title: String?,
         body: String?,
-        state: IssueState?
+        state: IssueState?,
+        labelIds: [String]? = nil
     ) async throws -> Issue {
         var variables: [String: Any] = ["id": issueId]
+
+        // When given, `labelIds` REPLACES the issue's whole label set (an empty array clears it).
+        // Callers must pass the complete intended set; omit it to leave labels untouched.
+        if let labelIds = labelIds {
+            variables["labelIds"] = labelIds
+        }
 
         // Validate and add title if provided
         if let title = title {
@@ -593,13 +612,60 @@ class GitHubAPIService {
 
     /// Finds a label by name in a repository, creating it if it doesn't exist. Case-insensitive match.
     /// Used to ensure a Kanban state label (`kanban-<Status>`) exists before assigning it.
+    ///
+    /// The repository's labels are listed once and cached for the session, so only the first move in
+    /// a repository pays for the lookup. See `invalidateLabelCache(for:)` for staleness handling.
     /// - Returns: The existing or newly created label.
     func ensureLabel(in repository: Repository, name: String, color: String) async throws -> Label {
-        let existing = try await fetchAllRepositoryLabels(owner: repository.owner.login, repo: repository.name)
-        if let match = existing.first(where: { $0.name.lowercased() == name.lowercased() }) {
-            return match
+        if let cached = labelCache.label(named: name, repositoryID: repository.id) {
+            return cached
         }
-        return try await createLabel(repositoryId: repository.id, name: name, color: color)
+
+        if !labelCache.isPopulated(repositoryID: repository.id) {
+            let existing = try await fetchAllRepositoryLabels(owner: repository.owner.login, repo: repository.name)
+            labelCache.store(existing, repositoryID: repository.id)
+            if let match = labelCache.label(named: name, repositoryID: repository.id) {
+                return match
+            }
+        }
+
+        let created = try await createLabel(repositoryId: repository.id, name: name, color: color)
+        labelCache.insert(created, repositoryID: repository.id)
+        return created
+    }
+
+    /// Drops the cached labels for `repository` after a write that relied on them failed (the
+    /// cache may be stale, e.g. a label was deleted on github.com).
+    /// - Returns: `true` if cached data existed, i.e. retrying with a fresh lookup could help.
+    @discardableResult
+    func invalidateLabelCache(for repository: Repository) -> Bool {
+        labelCache.invalidate(repositoryID: repository.id)
+    }
+
+    /// Closes an issue, removing any managed Kanban labels in the same request so it lands in the
+    /// Done column. One `updateIssue` mutation (~1 s) instead of remove-labels + update (~2.5 s).
+    ///
+    /// The label set is replaced from `issue.labels`, which comes from the list query and is cut
+    /// off at `KanbanMovePlanner.possiblyTruncatedLabelCount`; an issue that might have more labels
+    /// than that takes the slower targeted-removal route so no label can be lost.
+    func closeIssue(_ issue: Issue, managedLabelNames: Set<String>) async throws -> Issue {
+        let labelsToRemove = issue.labels.filter { managedLabelNames.contains($0.name.lowercased()) }
+
+        if labelsToRemove.isEmpty {
+            return try await updateIssue(issueId: issue.id, title: nil, body: nil, state: .closed)
+        }
+
+        if issue.labels.count < KanbanMovePlanner.possiblyTruncatedLabelCount {
+            let labelIds = KanbanMovePlanner.labelUpdate(
+                currentLabels: issue.labels,
+                managedLabelNames: managedLabelNames,
+                adding: nil
+            )
+            return try await updateIssue(issueId: issue.id, title: nil, body: nil, state: .closed, labelIds: labelIds)
+        }
+
+        try await removeLabelsFromIssue(issueId: issue.id, labelIds: labelsToRemove.map(\.id))
+        return try await updateIssue(issueId: issue.id, title: nil, body: nil, state: .closed)
     }
 
     /// Copies an issue into the destination repository, transferring the title, description,

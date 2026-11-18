@@ -253,27 +253,16 @@ class IssuesListViewModel: ObservableObject {
         pendingDeletions.insert(id)
     }
 
-    /// Removes any managed `kanban-<Status>` labels currently on the issue, so an issue closed
-    /// outside the Kanban board resolves to the Done (closed) column instead of lingering in its
-    /// old column. No-op when the issue carries no managed Kanban labels. Other users' `kanban-*`
-    /// labels (not part of this config) are left intact, mirroring `performKanbanMove`.
-    func clearManagedKanbanLabels(on issue: Issue) async {
-        let managed = KanbanSettingsService.shared.managedLabelNames
-        let labelsToRemove = issue.labels.filter { managed.contains($0.name.lowercased()) }
-        guard !labelsToRemove.isEmpty else { return }
-        do {
-            try await apiService.removeLabelsFromIssue(issueId: issue.id, labelIds: labelsToRemove.map { $0.id })
-        } catch {
-            AppLogger.shared.error("Failed to clear kanban labels on #\(issue.number): \(error.localizedDescription)")
-        }
-    }
-
-    /// Closes an issue via the API and immediately updates the local cache.
+    /// Closes an issue via the API and immediately updates the local cache. Any managed Kanban
+    /// label is removed in the same request so the closed issue lands in the Done column instead
+    /// of lingering in its old column; other users' `kanban-*` labels (not part of this config)
+    /// are left intact, mirroring `performKanbanMove`.
     func closeIssue(_ issue: Issue) async {
         do {
-            // Clear the managed Kanban label first so the closed issue lands in the Done column.
-            await clearManagedKanbanLabels(on: issue)
-            let updatedIssue = try await apiService.updateIssue(issueId: issue.id, title: nil, body: nil, state: .closed)
+            let updatedIssue = try await apiService.closeIssue(
+                issue,
+                managedLabelNames: KanbanSettingsService.shared.managedLabelNames
+            )
             upsertIssueInCache(updatedIssue)
             AppLogger.shared.info("Closed issue #\(issue.number) (\(issue.repository.fullName))")
         } catch {
@@ -479,51 +468,68 @@ class IssuesListViewModel: ObservableObject {
             steps.append("\(name)=\(step.elapsedString)ms")
             step = PerfTimer()
         }
-        do {
-            // Fetch the latest issue so we act on current labels/body (minimises clobber).
-            let (current, _) = try await apiService.fetchIssueDetail(
+
+        /// One read-modify-write: read the issue's current labels/body, then write the new labels,
+        /// body marker and open/closed state in a **single** `updateIssue` mutation. Each GitHub
+        /// mutation costs ~1–1.5 s, so this replaced a remove-labels / add-labels / update chain
+        /// (plus a second full re-read; the mutation response already is the canonical issue).
+        func attempt() async throws -> Issue {
+            // Read the latest issue so we act on current labels/body (minimises clobber). Uses the
+            // lightweight query: all labels (the replacement set must be complete), no comments.
+            let current = try await apiService.fetchIssueForUpdate(
                 owner: issue.repository.owner.login,
                 repo: issue.repository.name,
                 number: issue.number
             )
-            lap("read1")
+            lap("read")
 
-            // 1. Remove the managed Kanban labels currently on the issue.
-            let managed = settings.managedLabelNames
-            let labelsToRemove = current.labels.filter { managed.contains($0.name.lowercased()) }
-            if !labelsToRemove.isEmpty {
-                try await apiService.removeLabelsFromIssue(issueId: issue.id, labelIds: labelsToRemove.map { $0.id })
-                lap("removeLabels")
-            }
-
-            // 2. Add the target label unless this is the clutter-free default or closed state.
+            // The target label, unless this is the clutter-free default or closed state. Label ids
+            // come from a per-repository cache, so only the first move in a repo pays for a lookup.
             let isClutterFree = state.id == settings.defaultState.id || state.isClosed
+            var target: Label?
             if !isClutterFree {
-                let label = try await apiService.ensureLabel(
+                target = try await apiService.ensureLabel(
                     in: issue.repository,
                     name: Kanban.labelName(for: state),
                     color: settings.color(for: state)
                 )
                 lap("ensureLabel")
-                try await apiService.addLabelsToIssue(issueId: issue.id, labelIds: [label.id])
-                lap("addLabels")
             }
 
-            // 3. Write the order key into the body marker, and flip open/closed to match the column.
-            let newState: IssueState? = (state.isClosed != (issue.state == .closed))
+            // Managed Kanban labels are swapped for the target; other users' labels are kept. `nil`
+            // means the set is unchanged (e.g. reordering within a column), so labels are not sent.
+            let labelIds = KanbanMovePlanner.labelUpdate(
+                currentLabels: current.labels,
+                managedLabelNames: settings.managedLabelNames,
+                adding: target
+            )
+
+            // Write the order key into the body marker, and flip open/closed to match the column.
+            let newState: IssueState? = (state.isClosed != (current.state == .closed))
                 ? (state.isClosed ? .closed : .open)
                 : nil
             let newBody = KanbanOrderMarker.inject(orderKey, into: current.body)
-            _ = try await apiService.updateIssue(issueId: issue.id, title: nil, body: newBody, state: newState)
-            lap("updateIssue")
-
-            // 4. Re-fetch the canonical issue and reconcile the cache (real label IDs, etc.).
-            let (updated, _) = try await apiService.fetchIssueDetail(
-                owner: issue.repository.owner.login,
-                repo: issue.repository.name,
-                number: issue.number
+            let updated = try await apiService.updateIssue(
+                issueId: issue.id, title: nil, body: newBody, state: newState, labelIds: labelIds
             )
-            lap("read2")
+            lap("updateIssue")
+            return updated
+        }
+
+        do {
+            let updated: Issue
+            do {
+                updated = try await attempt()
+            } catch {
+                // A cached label id may be stale (label deleted/renamed on github.com). Drop the
+                // repository's cached labels and retry once with a fresh lookup; if nothing was
+                // cached the failure is genuine.
+                guard apiService.invalidateLabelCache(for: issue.repository) else { throw error }
+                AppLogger.shared.warning("Kanban move of #\(issue.number) failed (\(error.localizedDescription)); retrying with fresh labels")
+                steps.append("retry")
+                step = PerfTimer()
+                updated = try await attempt()
+            }
             upsertIssueInCache(updated)
             lap("upsert")
             PerfTimer.log("kanbanMove TOTAL", moveTimer, steps.joined(separator: " "))

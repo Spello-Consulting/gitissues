@@ -1,6 +1,7 @@
 # Issue #109 — Performance Plan
 
-Status: **Phase 0 and Phase 1 complete and measured. Phase 2 (Kanban move) is next; Phases 3–4 not started.**
+Status: **Phases 0–1 complete and measured (Phase 1 committed). Phase 2 (Kanban move) implemented, awaiting
+Release-build measurement. Phases 3–4 not started.**
 Branch: `feature/issue-109-performance`
 
 ## 1. Problem
@@ -132,7 +133,19 @@ Replace the 6–7 call chain with:
      already written read-then-write.
 4. **Use the mutation response** to update the cache and drop the second `fetchIssueDetail`.
 
-`closeIssue` + `clearManagedKanbanLabels` (two sequential mutations today) get the same single-mutation treatment.
+`closeIssue` + `clearManagedKanbanLabels` (two sequential mutations today) get the same single-mutation treatment
+(`GitHubAPIService.closeIssue`, used by both the list and detail view models).
+
+Implementation notes / safeguards:
+
+* Label-set calculation is a pure function (`KanbanMovePlanner.labelUpdate`) returning `nil` when the set is
+  unchanged (reordering within a column), in which case `labelIds` is omitted and labels aren't touched at all.
+* **Close path:** it works from the *cached* issue, whose labels come from the list query's `labels(first: 10)`. An
+  issue showing 10 labels may have more that were cut off, so replacing the set would drop them. Such issues fall
+  back to the old targeted remove-then-update route.
+* **Stale label cache:** if the write fails and the repo's labels were cached, the cache is dropped and the move
+  is retried once with a fresh lookup; otherwise the failure surfaces as before (and the card reverts).
+* The move's open/closed decision now uses the freshly-read state rather than the cached one.
 The optimistic UI and revert-on-failure behaviour are unchanged. Multi-card drags speed up by the same factor.
 
 ### Phase 3 — Persistent cache + incremental sync

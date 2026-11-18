@@ -153,34 +153,18 @@ class IssueDetailViewModel: ObservableObject {
         pasteboard.setString(url, forType: .string)
     }
 
-    /// Closes the issue (sets state to closed)
+    /// Closes the issue (sets state to closed). Any managed Kanban label is removed in the same
+    /// request so the closed issue lands in the Done column.
     func closeIssue() async {
         do {
-            // Clear the managed Kanban label first so the closed issue lands in the Done column.
-            await clearManagedKanbanLabels()
-            let updatedIssue = try await apiService.updateIssue(
-                issueId: issue.id,
-                title: nil,
-                body: nil,
-                state: .closed
+            let updatedIssue = try await apiService.closeIssue(
+                issue,
+                managedLabelNames: KanbanSettingsService.shared.managedLabelNames
             )
             self.issue = updatedIssue
             listViewModel?.upsertIssueInCache(updatedIssue)
         } catch {
             errorMessage = error.localizedDescription
-        }
-    }
-
-    /// Removes any managed `kanban-<Status>` labels from the current issue, so a directly-closed
-    /// issue resolves to the Done column. Mirrors `IssuesListViewModel.clearManagedKanbanLabels`.
-    private func clearManagedKanbanLabels() async {
-        let managed = KanbanSettingsService.shared.managedLabelNames
-        let labelsToRemove = issue.labels.filter { managed.contains($0.name.lowercased()) }
-        guard !labelsToRemove.isEmpty else { return }
-        do {
-            try await apiService.removeLabelsFromIssue(issueId: issue.id, labelIds: labelsToRemove.map { $0.id })
-        } catch {
-            AppLogger.shared.error("Failed to clear kanban labels on #\(issue.number): \(error.localizedDescription)")
         }
     }
 
