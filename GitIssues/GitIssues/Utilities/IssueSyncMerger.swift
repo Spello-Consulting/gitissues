@@ -24,6 +24,44 @@ enum IssueSyncMerger {
     /// shows older data. After this the server copy always wins.
     static let gracePeriod: TimeInterval = 30
 
+    /// Builds the list to publish from `incoming` plus the local mutations that may have raced ahead
+    /// of the fetch: re-injects unconfirmed insertions, hides pending deletions, and keeps
+    /// locally-edited issues the response doesn't reflect yet (see `merge`).
+    ///
+    /// - Parameter isComplete: `true` when `incoming` is the full result of a fetch. Only then can an
+    ///   issue's *absence* be read as "the server confirms the deletion", so pending deletions and
+    ///   insertions are only acknowledged (and dropped) for complete results. A partial result (some
+    ///   pages of a still-running fetch) leaves them untouched so a deleted issue can't flash back and
+    ///   an unconfirmed new issue isn't forgotten.
+    static func reconcile(
+        incoming: [Issue],
+        pendingUpdates: inout [String: PendingIssueUpdate],
+        pendingDeletions: inout Set<String>,
+        pendingInsertions: inout [Issue],
+        fetchStartedAt: Date,
+        isComplete: Bool,
+        now: Date = Date()
+    ) -> [Issue] {
+        let incomingIDs = Set(incoming.map { $0.id })
+
+        if isComplete {
+            // Confirmed absent → deletion acknowledged, stop filtering
+            pendingDeletions = pendingDeletions.filter { incomingIDs.contains($0) }
+            // Confirmed present → insertion acknowledged, stop prepending
+            pendingInsertions = pendingInsertions.filter { !incomingIDs.contains($0.id) }
+        }
+
+        let merged = merge(
+            incoming: incoming,
+            pending: &pendingUpdates,
+            fetchStartedAt: fetchStartedAt,
+            now: now
+        )
+        let visible = merged.filter { !pendingDeletions.contains($0.id) }
+        let unconfirmedInsertions = pendingInsertions.filter { !incomingIDs.contains($0.id) }
+        return unconfirmedInsertions + visible
+    }
+
     /// Returns `incoming` with any issue that has a still-pending local edit replaced by the local
     /// copy. Updates are dropped from `pending` once the server has caught up (or the grace period
     /// has expired).

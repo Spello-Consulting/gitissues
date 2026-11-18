@@ -135,6 +135,16 @@ class GraphQLClient {
         self.accessToken = accessToken
     }
 
+    /// The operation name in a GraphQL document (e.g. `AllIssues`), for logging. Documents that
+    /// contain several operations (aliased mutations) report the first one.
+    private static func operationName(in query: String) -> String {
+        let tokens = query.split(whereSeparator: { $0.isWhitespace || $0 == "(" || $0 == "{" })
+        for (index, token) in tokens.enumerated() where token == "query" || token == "mutation" {
+            if index + 1 < tokens.count { return String(tokens[index + 1]) }
+        }
+        return "anonymous"
+    }
+
     /// Executes a GraphQL query and decodes `data`.
     /// - Parameter tolerateErrors: When `true`, a response that carries both `errors` and usable
     ///   `data` (GitHub reports e.g. an unreadable cross-referenced repository this way) is
@@ -157,11 +167,29 @@ class GraphQLClient {
         let graphQLRequest = GraphQLRequest<T>(query: query, variables: variables)
         request.httpBody = try JSONEncoder().encode(graphQLRequest)
 
+        // Perf instrumentation (issue #109): one line per call with network, size and decode time.
+        let operation = Self.operationName(in: query)
+        let networkTimer = PerfTimer()
+        var networkMs = 0.0
+        var decodeMs = 0.0
+        var bytes = 0
+        var status = 0
+        defer {
+            PerfTimer.log(
+                "graphql \(operation)",
+                networkTimer,
+                "net=\(PerfTimer.format(networkMs))ms decode=\(PerfTimer.format(decodeMs))ms bytes=\(bytes) http=\(status)"
+            )
+        }
+
         let (data, response) = try await URLSession.shared.data(for: request)
+        networkMs = networkTimer.elapsedMs
+        bytes = data.count
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw GraphQLError.serverError("Invalid response")
         }
+        status = httpResponse.statusCode
 
         // Handle common HTTP errors
         if httpResponse.statusCode == 401 {
@@ -186,6 +214,9 @@ class GraphQLClient {
         // Configure decoder for ISO8601 dates
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
+
+        let decodeTimer = PerfTimer()
+        defer { decodeMs = decodeTimer.elapsedMs }
 
         do {
             let graphQLResponse = try decoder.decode(GraphQLResponse<T>.self, from: data)

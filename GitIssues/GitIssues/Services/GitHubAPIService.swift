@@ -33,7 +33,11 @@ class GitHubAPIService {
         return response.viewer.login
     }
 
-    /// Fetches all issues involving the authenticated user using search
+    /// Issues per search request. 100 is GitHub's maximum; larger pages mean fewer round trips,
+    /// and per-request latency (~1.5 s) rather than payload size dominates load time (issue #109).
+    static let issuesPageSize = 100
+
+    /// Fetches one page of issues involving the authenticated user using search.
     /// - Parameters:
     ///   - states: Filter by issue state (open, closed, or nil for all)
     ///   - repositoryFullNames: Filter by specific repositories (e.g., ["owner/repo1", "owner/repo2"])
@@ -46,42 +50,14 @@ class GitHubAPIService {
         visibility: String? = nil,
         cursor: String? = nil
     ) async throws -> (issues: [Issue], hasNextPage: Bool, endCursor: String?) {
-        // Build search query string
-        var queryParts = ["involves:@me", "sort:updated-desc"]
+        let searchQuery = IssueSearchQuery.build(
+            states: states,
+            allowReadOnly: AppStateService.allowReadOnlyRepoAccess,
+            repositoryFullNames: repositoryFullNames,
+            visibility: visibility
+        )
 
-        // Exclude archived (read-only) repositories unless the user has opted in.
-        if !AppStateService.allowReadOnlyRepoAccess {
-            queryParts.append("archived:false")
-        }
-
-        // Add state filter
-        if let states = states {
-            let stateStrings = states.map { state -> String in
-                switch state {
-                case .open: return "is:open"
-                case .closed: return "is:closed"
-                }
-            }
-            if stateStrings.count == 1 {
-                queryParts.append(stateStrings[0])
-            }
-            // If both open and closed, don't add state filter (shows all)
-        }
-
-        // Add repository filter
-        if let repos = repositoryFullNames, !repos.isEmpty {
-            let repoQuery = repos.map { "repo:\($0)" }.joined(separator: " ")
-            queryParts.append(repoQuery)
-        }
-
-        // Add visibility filter
-        if let visibility = visibility {
-            queryParts.append("is:\(visibility)")
-        }
-
-        let searchQuery = queryParts.joined(separator: " ")
-
-        var variables: [String: Any] = ["query": searchQuery]
+        var variables: [String: Any] = ["query": searchQuery, "first": Self.issuesPageSize]
 
         if let cursor = cursor {
             variables["cursor"] = cursor
@@ -92,48 +68,52 @@ class GitHubAPIService {
             variables: variables
         )
 
-        // Filter out nil nodes (non-Issue types like PRs that don't match the inline fragment)
+        // Defensive: the search is restricted to issues (`is:issue`), but skip any node that still
+        // fails to decode as an Issue.
         let issues = response.search.nodes.compactMap { $0?.toIssue() }
         let pageInfo = response.search.pageInfo
 
         return (issues, pageInfo.hasNextPage, pageInfo.endCursor)
     }
 
-    /// Fetches all issues across all pages
-    /// - Parameters:
-    ///   - states: Filter by issue state (open, closed, or nil for all)
-    ///   - repositoryFullNames: Filter by specific repositories (e.g., ["owner/repo1", "owner/repo2"])
-    ///   - visibility: Filter by repository visibility (public, private, or nil for all)
-    /// - Returns: Array of all issues
-    func fetchAllIssues(
-        states: [IssueState]? = nil,
-        repositoryFullNames: [String]? = nil,
-        visibility: String? = nil
-    ) async throws -> [Issue] {
-        var allIssues: [Issue] = []
+    /// Pages through every issue in `state` (or all states when `nil`), handing each page to
+    /// `onPage` as soon as it arrives so callers can show results progressively.
+    ///
+    /// Cursor pagination within one search is inherently sequential, so callers that want speed run
+    /// separate streams concurrently (the view model runs open and closed together).
+    ///
+    /// Pages are de-duplicated: GitHub search results can shift between pages (e.g. when cloning
+    /// changes `updatedAt` timestamps mid-pagination), causing the same issue to appear on two pages.
+    /// - Returns: The number of distinct issues delivered.
+    @discardableResult
+    func fetchIssuePages(
+        state: IssueState?,
+        onPage: (_ page: [Issue]) async -> Void
+    ) async throws -> Int {
+        let label = state.map { $0 == .open ? "open" : "closed" } ?? "all"
+        let totalTimer = PerfTimer()
         var seenIDs = Set<String>()
         var cursor: String? = nil
         var hasNextPage = true
+        var pageCount = 0
 
         while hasNextPage {
+            let pageTimer = PerfTimer()
             let (issues, nextPage, nextCursor) = try await fetchIssues(
-                states: states,
-                repositoryFullNames: repositoryFullNames,
-                visibility: visibility,
+                states: state.map { [$0] },
                 cursor: cursor
             )
+            pageCount += 1
+            let fresh = issues.filter { seenIDs.insert($0.id).inserted }
+            PerfTimer.log("fetchIssues[\(label)] page \(pageCount)", pageTimer, "issues=\(fresh.count) hasNext=\(nextPage)")
 
-            // Deduplicate: GitHub search results can shift between pages (e.g. when cloning
-            // changes updatedAt timestamps mid-pagination), causing the same issue to appear
-            // on multiple pages.
-            for issue in issues where seenIDs.insert(issue.id).inserted {
-                allIssues.append(issue)
-            }
+            await onPage(fresh)
             hasNextPage = nextPage
             cursor = nextCursor
         }
 
-        return allIssues
+        PerfTimer.log("fetchIssuePages[\(label)] TOTAL", totalTimer, "pages=\(pageCount) issues=\(seenIDs.count)")
+        return seenIDs.count
     }
 
     /// Fetches a specific issue with its comments

@@ -57,11 +57,17 @@ struct KanbanBoardView: View {
     /// Issues for a column: those whose placement resolves to `state`. Manually-ordered issues
     /// (with an order key) come first, sorted by key; unkeyed issues follow in filtered order.
     private func issues(for state: KanbanState) -> [Issue] {
+        let timer = PerfTimer()
         let inColumn = viewModel.filteredIssues.filter { settings.state(for: $0).id == state.id }
         let keyed = inColumn
             .filter { $0.kanbanOrderKey != nil }
             .sorted { ($0.kanbanOrderKey ?? "") < ($1.kanbanOrderKey ?? "") }
         let unkeyed = inColumn.filter { $0.kanbanOrderKey == nil }
+        PerfTimer.log(
+            "kanban column '\(state.name)'", timer,
+            "scanned=\(viewModel.filteredIssues.count) inColumn=\(inColumn.count)",
+            slowAfterMs: 10
+        )
         return keyed + unkeyed
     }
 }

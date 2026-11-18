@@ -111,4 +111,75 @@ final class IssueSyncMergerTests: XCTestCase {
 
         XCTAssertEqual(merged.map(\.title), ["Edited", "Other"])
     }
+
+    // MARK: - reconcile (issue #109: progressive loading)
+
+    private func reconcile(
+        incoming: [Issue],
+        deletions: inout Set<String>,
+        insertions: inout [Issue],
+        complete: Bool
+    ) -> [Issue] {
+        var updates: [String: PendingIssueUpdate] = [:]
+        return IssueSyncMerger.reconcile(
+            incoming: incoming,
+            pendingUpdates: &updates,
+            pendingDeletions: &deletions,
+            pendingInsertions: &insertions,
+            fetchStartedAt: t0,
+            isComplete: complete,
+            now: t0
+        )
+    }
+
+    func testPartialResultKeepsPendingDeletionHidden() {
+        // The deleted issue is absent from an early page only because it hasn't loaded yet; the
+        // deletion must not be treated as acknowledged, or it would reappear on a later page.
+        var deletions: Set<String> = ["gone"]
+        var insertions: [Issue] = []
+
+        let partial = reconcile(incoming: [Fixture.issue(id: "A")], deletions: &deletions, insertions: &insertions, complete: false)
+        XCTAssertEqual(deletions, ["gone"])
+        XCTAssertEqual(partial.map(\.id), ["A"])
+
+        let later = reconcile(
+            incoming: [Fixture.issue(id: "A"), Fixture.issue(id: "gone")],
+            deletions: &deletions, insertions: &insertions, complete: false
+        )
+        XCTAssertEqual(later.map(\.id), ["A"], "Pending deletion stays hidden when its page arrives")
+    }
+
+    func testCompleteResultAcknowledgesAbsentDeletion() {
+        var deletions: Set<String> = ["gone"]
+        var insertions: [Issue] = []
+
+        _ = reconcile(incoming: [Fixture.issue(id: "A")], deletions: &deletions, insertions: &insertions, complete: true)
+
+        XCTAssertTrue(deletions.isEmpty, "Server confirmed the deletion")
+    }
+
+    func testPartialResultPrependsUnconfirmedInsertionAndKeepsIt() {
+        let created = Fixture.issue(id: "new")
+        var deletions: Set<String> = []
+        var insertions = [created]
+
+        let partial = reconcile(incoming: [Fixture.issue(id: "A")], deletions: &deletions, insertions: &insertions, complete: false)
+
+        XCTAssertEqual(partial.map(\.id), ["new", "A"])
+        XCTAssertEqual(insertions.map(\.id), ["new"], "Still unconfirmed")
+    }
+
+    func testCompleteResultAcknowledgesPresentInsertionWithoutDuplicating() {
+        let created = Fixture.issue(id: "new")
+        var deletions: Set<String> = []
+        var insertions = [created]
+
+        let result = reconcile(
+            incoming: [Fixture.issue(id: "new"), Fixture.issue(id: "A")],
+            deletions: &deletions, insertions: &insertions, complete: true
+        )
+
+        XCTAssertEqual(result.map(\.id), ["new", "A"])
+        XCTAssertTrue(insertions.isEmpty)
+    }
 }
