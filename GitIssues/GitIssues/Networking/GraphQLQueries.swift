@@ -802,10 +802,13 @@ struct IssueActivityResponse: Codable {
 
 // Response structure for issue detail query
 struct IssueDetailResponse: Codable {
-    let repository: RepositoryDetail
+    /// `nil` when the repository is gone or inaccessible. Together with `issue` this is optional so
+    /// a deleted issue (`"issue": null` plus a `NOT_FOUND` error) decodes and can be reported as
+    /// `GraphQLError.notFound` rather than as a decoding failure.
+    let repository: RepositoryDetail?
 
     struct RepositoryDetail: Codable {
-        let issue: IssueDetailNode
+        let issue: IssueDetailNode?
     }
 
     struct IssueDetailNode: Codable {

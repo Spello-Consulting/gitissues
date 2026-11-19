@@ -50,13 +50,15 @@ class GitHubAPIService {
         states: [IssueState]? = nil,
         repositoryFullNames: [String]? = nil,
         visibility: String? = nil,
+        updatedSince: Date? = nil,
         cursor: String? = nil
     ) async throws -> (issues: [Issue], hasNextPage: Bool, endCursor: String?) {
         let searchQuery = IssueSearchQuery.build(
             states: states,
             allowReadOnly: AppStateService.allowReadOnlyRepoAccess,
             repositoryFullNames: repositoryFullNames,
-            visibility: visibility
+            visibility: visibility,
+            updatedSince: updatedSince
         )
 
         var variables: [String: Any] = ["query": searchQuery, "first": Self.issuesPageSize]
@@ -90,9 +92,10 @@ class GitHubAPIService {
     @discardableResult
     func fetchIssuePages(
         state: IssueState?,
+        updatedSince: Date? = nil,
         onPage: (_ page: [Issue]) async -> Void
     ) async throws -> Int {
-        let label = state.map { $0 == .open ? "open" : "closed" } ?? "all"
+        let label = (state.map { $0 == .open ? "open" : "closed" } ?? "all") + (updatedSince == nil ? "" : "+incremental")
         let totalTimer = PerfTimer()
         var seenIDs = Set<String>()
         var cursor: String? = nil
@@ -103,6 +106,7 @@ class GitHubAPIService {
             let pageTimer = PerfTimer()
             let (issues, nextPage, nextCursor) = try await fetchIssues(
                 states: state.map { [$0] },
+                updatedSince: updatedSince,
                 cursor: cursor
             )
             pageCount += 1
@@ -140,10 +144,11 @@ class GitHubAPIService {
             variables: variables
         )
 
-        let issue = response.repository.issue.toIssue()
-        let comments = response.repository.issue.toComments()
+        guard let node = response.repository?.issue else {
+            throw GraphQLError.notFound
+        }
 
-        return (issue, comments)
+        return (node.toIssue(), node.toComments())
     }
 
     /// Reads one issue for a read-modify-write (e.g. a Kanban move): all its labels, no comments.

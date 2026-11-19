@@ -58,8 +58,58 @@ enum IssueSyncMerger {
             now: now
         )
         let visible = merged.filter { !pendingDeletions.contains($0.id) }
+        if isComplete {
+            expireUnconfirmedInsertions(pendingUpdates: pendingUpdates, pendingInsertions: &pendingInsertions)
+        }
         let unconfirmedInsertions = pendingInsertions.filter { !incomingIDs.contains($0.id) }
         return unconfirmedInsertions + visible
+    }
+
+    /// Merges the result of an **incremental** sync (`changed` = issues updated since some moment)
+    /// into the existing list: changed issues replace their old copy in place, issues not yet in the
+    /// list are inserted at the front, and everything else is left alone.
+    ///
+    /// Local mutations that may have raced ahead of the fetch are respected exactly as in
+    /// `reconcile`: a pending edit beats a stale server copy (`merge`), a pending deletion stays
+    /// hidden, and an unconfirmed insertion is acknowledged once the server returns it.
+    ///
+    /// An incremental result says nothing about issues it *doesn't* contain, so — unlike a complete
+    /// `reconcile` — an absent issue is never treated as deleted.
+    static func applyIncremental(
+        existing: [Issue],
+        changed: [Issue],
+        pendingUpdates: inout [String: PendingIssueUpdate],
+        pendingDeletions: Set<String>,
+        pendingInsertions: inout [Issue],
+        fetchStartedAt: Date,
+        now: Date = Date()
+    ) -> [Issue] {
+        let changedIDs = Set(changed.map { $0.id })
+        pendingInsertions = pendingInsertions.filter { !changedIDs.contains($0.id) }
+
+        let merged = merge(incoming: changed, pending: &pendingUpdates, fetchStartedAt: fetchStartedAt, now: now)
+            .filter { !pendingDeletions.contains($0.id) }
+        expireUnconfirmedInsertions(pendingUpdates: pendingUpdates, pendingInsertions: &pendingInsertions)
+        let mergedByID = Dictionary(merged.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+
+        let existingIDs = Set(existing.map { $0.id })
+        let updated = existing.map { mergedByID[$0.id] ?? $0 }
+        let inserted = merged.filter { !existingIDs.contains($0.id) }
+        return inserted + updated
+    }
+
+    /// Stops protecting a locally-created issue the server never confirmed.
+    ///
+    /// An unconfirmed insertion is re-injected into every complete result, so one that the server
+    /// will never return (the issue was deleted or moved on github.com before any sync saw it)
+    /// would otherwise stay in the list for the whole session. Insertions are only protected for
+    /// the same grace period as local edits: `upsertIssueInCache` registers a pending update for
+    /// every insertion, and `merge` drops that update once the grace period lapses.
+    private static func expireUnconfirmedInsertions(
+        pendingUpdates: [String: PendingIssueUpdate],
+        pendingInsertions: inout [Issue]
+    ) {
+        pendingInsertions = pendingInsertions.filter { pendingUpdates[$0.id] != nil }
     }
 
     /// Returns `incoming` with any issue that has a still-pending local edit replaced by the local

@@ -20,6 +20,7 @@ class IssuesListViewModel: ObservableObject {
     @Published var viewerLogin: String?
 
     private let apiService: GitHubAPIService
+    private let cacheStore: IssueCacheStore
     let pinningService: PinningService // Made public so detail view can access it
     /// Serial queue for background GitHub mutations; drives the bottom progress bar.
     let taskQueue = BackgroundTaskQueue()
@@ -36,8 +37,20 @@ class IssuesListViewModel: ObservableObject {
     private var fetchSequence = 0
     private var lastAppliedFetchSequence = 0
 
-    init(accessToken: String) {
+    // Sync bookkeeping (issue #109): decides full vs incremental syncs and is persisted with the
+    // on-disk cache so it survives a relaunch.
+    /// When the last *complete* fetch started.
+    private var lastFullSyncAt: Date?
+    /// When the most recent fetch (full or incremental) started.
+    private var lastSyncAt: Date?
+    /// The cache store's generation when this view model started (or last reset); saves made under
+    /// an older generation (after a sign-out / cache clear) are dropped.
+    private var cacheGeneration: Int
+
+    init(accessToken: String, cacheStore: IssueCacheStore = .shared) {
         self.apiService = GitHubAPIService(accessToken: accessToken)
+        self.cacheStore = cacheStore
+        self.cacheGeneration = cacheStore.generation
         self.pinningService = PinningService()
         self.pinnedIssueIDs = pinningService.getPinnedIssues()
 
@@ -58,6 +71,21 @@ class IssuesListViewModel: ObservableObject {
             .dropFirst() // Skip initial value
             .sink { [weak self] newFilterOptions in
                 self?.appStateService.saveFilterState(newFilterOptions)
+            }
+            .store(in: &cancellables)
+
+        // Persist the issue list shortly after it settles, so the next launch can show it at once.
+        $allIssues
+            .dropFirst()
+            .debounce(for: .seconds(2), scheduler: DispatchQueue.main)
+            .sink { [weak self] _ in self?.saveCacheIfIdle() }
+            .store(in: &cancellables)
+
+        // "Clear Cache & Reload" in Settings.
+        NotificationCenter.default.publisher(for: .issueCacheCleared)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                Task { await self.resetAfterCacheCleared() }
             }
             .store(in: &cancellables)
 
@@ -106,6 +134,142 @@ class IssuesListViewModel: ObservableObject {
         isRefreshing = false
     }
 
+    // MARK: - Launch, cache and incremental sync (issue #109)
+
+    /// Launch entry point. Shows the cached issue list immediately (when there is one for this
+    /// account), then brings it up to date: a small incremental request if the cache is recent, or
+    /// a full reload if it is old, missing, or was fetched under different settings. With no cache
+    /// this is just `loadIssues()`.
+    func loadInitialIssues() async {
+        guard let snapshot = await restoreFromCache() else {
+            await loadIssues()
+            return
+        }
+
+        // Confirm the cache belongs to the signed-in account, concurrently with the refresh.
+        let verification = Task { try await self.apiService.fetchViewerLogin() }
+
+        switch SyncPlanner.mode(lastFullSyncAt: lastFullSyncAt, lastSyncAt: lastSyncAt) {
+        case .full:
+            await loadIssues()
+        case .incremental(let since):
+            isRefreshing = true
+            errorMessage = nil
+            let timer = PerfTimer()
+            do {
+                let changed = try await fetchAndApplyIncremental(since: since)
+                PerfTimer.log("launch incremental sync", timer, "changed=\(changed)")
+            } catch {
+                AppLogger.shared.error("Launch sync failed: \(error.localizedDescription)")
+                errorMessage = error.localizedDescription
+            }
+            isRefreshing = false
+        }
+
+        // Different account than the cache was written for: throw it all away and start fresh.
+        if let login = try? await verification.value, login != snapshot.userLogin {
+            AppLogger.shared.warning("Issue cache belonged to another account; discarding")
+            cacheStore.clear()
+            cacheGeneration = cacheStore.generation
+            clearInMemoryIssues()
+            viewerLogin = login
+            await loadIssues()
+        }
+    }
+
+    /// Publishes the on-disk snapshot, if any. Returns it when the list was restored.
+    private func restoreFromCache() async -> CachedIssueSnapshot? {
+        guard allIssues.isEmpty, let snapshot = await cacheStore.load() else { return nil }
+        // Something else may have populated the list while the file was being read.
+        guard allIssues.isEmpty else { return nil }
+
+        viewerLogin = snapshot.userLogin
+        allIssues = snapshot.issues
+        lastSyncAt = snapshot.lastSyncAt
+        // A cache built under a different read-only setting may be missing (or wrongly contain)
+        // archived-repo issues; leaving the full-sync time unset forces a full reload.
+        lastFullSyncAt = snapshot.allowReadOnly == AppStateService.allowReadOnlyRepoAccess
+            ? snapshot.lastFullSyncAt
+            : nil
+        AppLogger.shared.info("Restored \(snapshot.issues.count) issues from cache")
+        return snapshot
+    }
+
+    /// Writes the current list to disk, unless a load or background mutation is still in flight
+    /// (the list may then be partial or hold an unconfirmed optimistic edit) or no full sync has
+    /// completed yet.
+    private func saveCacheIfIdle() {
+        guard !isLoading, !isRefreshing, !taskQueue.isProcessing,
+              !allIssues.isEmpty,
+              let login = viewerLogin,
+              let lastFullSyncAt, let lastSyncAt else { return }
+
+        cacheStore.save(
+            CachedIssueSnapshot(
+                schemaVersion: IssueCacheStore.schemaVersion,
+                userLogin: login,
+                savedAt: Date(),
+                lastFullSyncAt: lastFullSyncAt,
+                lastSyncAt: lastSyncAt,
+                allowReadOnly: AppStateService.allowReadOnlyRepoAccess,
+                issues: allIssues
+            ),
+            generation: cacheGeneration
+        )
+    }
+
+    /// Drops the in-memory list and sync state (after the cache was cleared or turned out to belong
+    /// to another account).
+    private func clearInMemoryIssues() {
+        allIssues = []
+        pendingDeletions = []
+        pendingInsertions = []
+        pendingUpdates = [:]
+        lastFullSyncAt = nil
+        lastSyncAt = nil
+    }
+
+    private func resetAfterCacheCleared() async {
+        cacheGeneration = cacheStore.generation
+        clearInMemoryIssues()
+        await loadIssues()
+    }
+
+    /// Fetches only issues updated since `since` and merges them into the list. Returns how many
+    /// changed issues came back.
+    @discardableResult
+    private func fetchAndApplyIncremental(since: Date) async throws -> Int {
+        fetchSequence += 1
+        let sequence = fetchSequence
+        let startedAt = Date()
+        let timer = PerfTimer()
+
+        if viewerLogin == nil {
+            viewerLogin = try await apiService.fetchViewerLogin()
+        }
+
+        let accumulator = IssueFetchAccumulator()
+        try await apiService.fetchIssuePages(state: nil, updatedSince: since) { accumulator.add($0) }
+        let changed = accumulator.snapshot
+
+        guard sequence > lastAppliedFetchSequence else { return changed.count }
+        lastAppliedFetchSequence = sequence
+
+        if !changed.isEmpty {
+            allIssues = IssueSyncMerger.applyIncremental(
+                existing: allIssues,
+                changed: changed,
+                pendingUpdates: &pendingUpdates,
+                pendingDeletions: pendingDeletions,
+                pendingInsertions: &pendingInsertions,
+                fetchStartedAt: startedAt
+            )
+        }
+        lastSyncAt = startedAt
+        PerfTimer.log("incremental sync", timer, "since=\(IssueSearchQuery.timestamp(since)) changed=\(changed.count) total=\(allIssues.count)")
+        return changed.count
+    }
+
     // MARK: - Background Sync
 
     func startBackgroundSync() {
@@ -134,7 +298,12 @@ class IssuesListViewModel: ObservableObject {
     private func syncIssuesSilently() async {
         guard !isLoading, !isRefreshing else { return }
         do {
-            _ = try await fetchAndApplyIssues(progressive: false)
+            switch SyncPlanner.mode(lastFullSyncAt: lastFullSyncAt, lastSyncAt: lastSyncAt) {
+            case .full:
+                _ = try await fetchAndApplyIssues(progressive: false)
+            case .incremental(let since):
+                try await fetchAndApplyIncremental(since: since)
+            }
         } catch {
             // Silent sync — don't surface transient errors
         }
@@ -203,6 +372,8 @@ class IssuesListViewModel: ObservableObject {
         // pipeline, so this includes `applyFiltersAndSort` on the main thread.
         let applyTimer = PerfTimer()
         publish(issues, fetchStartedAt: startedAt, isComplete: true)
+        lastFullSyncAt = startedAt
+        lastSyncAt = startedAt
         PerfTimer.log("applyIssuesFromSync (merge+filter+sort)", applyTimer, "issues=\(issues.count)")
         PerfTimer.log("fetchAndApplyIssues TOTAL", fetchTimer, "issues=\(issues.count) progressive=\(progressive)")
         return issues.count

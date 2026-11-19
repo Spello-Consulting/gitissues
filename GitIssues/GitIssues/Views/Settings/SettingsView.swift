@@ -150,6 +150,24 @@ struct GeneralSettingsView: View {
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+
+                Divider()
+
+                // Local issue cache (issue #109)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Local Cache")
+                        .font(.headline)
+
+                    Button("Clear Cache & Reload") {
+                        IssueCacheStore.shared.clear()
+                        NotificationCenter.default.post(name: .issueCacheCleared, object: nil)
+                    }
+
+                    Text("GitIssues keeps a copy of your issues on this Mac so the list appears instantly at launch, then updates it in the background. Clearing it deletes that copy and reloads everything from GitHub. Use this if the list ever looks out of date.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .padding()
         }

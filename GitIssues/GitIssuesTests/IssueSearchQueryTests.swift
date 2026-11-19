@@ -45,4 +45,13 @@ final class IssueSearchQueryTests: XCTestCase {
         )
         XCTAssertTrue(terms(query).isSuperset(of: ["repo:a/one", "repo:b/two", "is:private"]))
     }
+
+    func testUpdatedSinceAddsUTCTimestampQualifier() {
+        // 2026-11-18T14:00:00Z
+        let date = Date(timeIntervalSince1970: 1_795_010_400)
+        let query = IssueSearchQuery.build(allowReadOnly: true, updatedSince: date)
+        XCTAssertTrue(terms(query).contains("updated:>=\(IssueSearchQuery.timestamp(date))"))
+        XCTAssertEqual(IssueSearchQuery.timestamp(Date(timeIntervalSince1970: 0)), "1970-01-01T00:00:00Z")
+        XCTAssertFalse(terms(IssueSearchQuery.build(allowReadOnly: true)).contains { $0.hasPrefix("updated:") })
+    }
 }

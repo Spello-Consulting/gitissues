@@ -1,7 +1,7 @@
 # Issue #109 — Performance Plan
 
 Status: **Phases 0–2 complete, measured and committed (a Kanban move is now 1.4–2.1 s, was 3.3–4.3 s). Phase 4
-implemented, awaiting measurement. Phase 3 (disk cache) not started.**
+measured and committed. Phase 3 (disk cache + incremental sync) implemented, awaiting measurement.**
 Branch: `feature/issue-109-performance`
 
 ## 1. Problem
@@ -148,18 +148,38 @@ Implementation notes / safeguards:
 * The move's open/closed decision now uses the freshly-read state rather than the cached one.
 The optimistic UI and revert-on-failure behaviour are unchanged. Multi-card drags speed up by the same factor.
 
-### Phase 3 — Persistent cache + incremental sync
+### Phase 3 — Persistent cache + incremental sync — implemented, awaiting measurement
 
-1. **`IssueCacheStore`**: `[Issue]` + `viewerLogin` + `savedAt` + `schemaVersion` as JSON in the app sandbox
-   (`Application Support/<bundle>/cache-<userLogin>.json`), written off the main thread, atomically, debounced.
-2. **Launch sequence:** load cache → publish immediately (usable instantly) → background full fetch (Phase 1) → swap
-   in the result via the existing merger. A refresh indicator shows while it runs.
-3. **Incremental background sync:** timer ticks query `… updated:>=<lastSync − safety margin>` and merge the few changed
-   issues (1 request instead of 12). Incremental sync can't see deletions, transfers or un-involvement, so a **full
-   reconcile** still runs at launch, on the manual Refresh button, and every N-th tick.
-4. **Invalidation:** cache cleared on sign-out/account change and on `schemaVersion` change; a corrupt or
-   undecodable file is ignored and deleted.
-5. **Settings:** a "Clear local cache" button.
+1. **`IssueCacheStore`** keeps one JSON file, `Application Support/IssueCache/issues.json`, inside the app sandbox:
+   the issue list plus `userLogin`, `savedAt`, `lastFullSyncAt`, `lastSyncAt`, the "allow read-only repos" setting it
+   was fetched under, and a `schemaVersion`. The GitHub token is never stored there (it stays in the Keychain).
+   Encode/decode run on the main actor (the models' `Codable` conformances are main-actor isolated in this module);
+   file I/O runs on a background task, writes are chained so they land in order, atomically.
+2. **Saving:** debounced 2 s after the list changes, and only when idle — not while a load is running, not while the
+   background queue has unconfirmed Kanban/batch edits, and not before the first full sync has completed (so a
+   half-loaded list is never persisted).
+3. **Launch (`loadInitialIssues`)**: restore the cache and show it immediately, then choose by `SyncPlanner`:
+   * last full sync < 10 min ago and settings unchanged → **one incremental request**;
+   * otherwise (old cache, no cache, different read-only setting) → full reload, keeping the cached list visible
+     (it is swapped in at the end, not rebuilt).
+   The signed-in account is verified concurrently; a cache from another account is discarded and everything reloads.
+4. **Incremental sync** (`updated:>=<lastSync − 5 min>`, all states, one search stream): changed issues replace their
+   old copy in place, new ones are inserted at the front, nothing is ever treated as deleted
+   (`IssueSyncMerger.applyIncremental`, which keeps the same local-edit / pending-deletion / pending-insertion
+   protections as the full path). The 5-minute overlap covers GitHub's search-index lag.
+5. **Full reconcile** still happens: at launch when the cache is more than 10 minutes old, on the Refresh button
+   and after issue edits (unchanged behaviour), and on the background timer whenever the last full sync is more
+   than 10 minutes old. So a deletion/transfer made elsewhere shows up within ~10 minutes at worst.
+6. **Invalidation:** cleared on sign-out and re-authorization; a corrupt file or other schema version is ignored and
+   deleted; saves made before a clear are rejected (a generation counter), so a debounced save can't resurrect the
+   file after sign-out.
+7. **Settings → General → Local Cache → "Clear Cache & Reload"** deletes the file, drops the in-memory list and
+   reloads everything from GitHub. (It reloads rather than just deleting, because the app would otherwise
+   immediately re-save its in-memory list.)
+
+Success measures from the log: `issue cache load` (a few tens of ms), list visible at launch without waiting for the
+network, `launch incremental sync … changed=N` taking ~1 s instead of ~8–11 s, and timer syncs logging
+`incremental sync` (one request) instead of `fetchAndApplyIssues TOTAL` (~8 s).
 
 ### Phase 4 — Board CPU clean-up (justified by §2.4) — implemented, awaiting measurement
 

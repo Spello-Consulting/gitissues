@@ -80,6 +80,7 @@ final class OAuth2Manager: NSObject, ObservableObject {
     func reauthorizeForScopeChange() {
         AppLogger.shared.info("Re-authorizing for scope change (private access: \(allowPrivateRepoAccess))")
         tokenStorage.clear()
+        IssueCacheStore.shared.clear() // visible repositories change with the granted scope
         isAuthenticated = false
         signIn()
     }
@@ -87,6 +88,7 @@ final class OAuth2Manager: NSObject, ObservableObject {
     func signOut() {
         AppLogger.shared.info("User signed out")
         tokenStorage.clear()
+        IssueCacheStore.shared.clear() // don't leave the previous account's issues on disk
         isAuthenticated = false
         isAuthenticating = false
         deviceFlowUserCode = nil

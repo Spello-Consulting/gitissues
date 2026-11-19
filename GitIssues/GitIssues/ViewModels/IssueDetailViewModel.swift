@@ -66,6 +66,13 @@ class IssueDetailViewModel: ObservableObject {
             }
 
             self.comments = fetchedComments
+        } catch GraphQLError.notFound {
+            // GitHub says this issue no longer exists (deleted or transferred elsewhere). Drop it
+            // from the list now rather than waiting for the next full sync; the list selection
+            // follows `allIssues`, so this also closes the detail pane.
+            AppLogger.shared.info("Issue #\(issue.number) no longer exists on GitHub; removing it from the list")
+            listViewModel?.removeIssueFromCache(id: issue.id)
+            errorMessage = GraphQLError.notFound.localizedDescription
         } catch {
             errorMessage = error.localizedDescription
         }

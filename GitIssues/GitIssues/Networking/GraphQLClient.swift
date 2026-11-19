@@ -16,9 +16,13 @@ enum GraphQLError: LocalizedError {
     case graphQLErrors([String])
     case unauthorized
     case rateLimited(reset: Date?)
+    /// GitHub reported the requested object does not exist (e.g. an issue deleted elsewhere).
+    case notFound
 
     var errorDescription: String? {
         switch self {
+        case .notFound:
+            return "This item no longer exists on GitHub."
         case .noAccessToken:
             return "No access token available. Please sign in."
         case .invalidURL:
@@ -63,6 +67,11 @@ struct GraphQLResponse<T: Codable>: Codable {
 
 struct GraphQLResponseError: Codable {
     let message: String
+    /// GitHub's machine-readable error class, e.g. `NOT_FOUND`, `FORBIDDEN`.
+    let type: String?
+
+    var isNotFound: Bool { type == "NOT_FOUND" }
+
     let path: [String]?
     let locations: [Location]?
 
@@ -228,6 +237,9 @@ class GraphQLClient {
                     return partial
                 }
                 AppLogger.shared.error("GraphQL errors: \(errorMessages.joined(separator: "; "))")
+                if errors.contains(where: { $0.isNotFound }) {
+                    throw GraphQLError.notFound
+                }
                 throw GraphQLError.graphQLErrors(errorMessages)
             }
 

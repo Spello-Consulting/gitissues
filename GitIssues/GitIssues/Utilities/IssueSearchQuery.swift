@@ -14,6 +14,8 @@ enum IssueSearchQuery {
     ///   - allowReadOnly: When `false`, archived (read-only) repositories are excluded server-side.
     ///   - repositoryFullNames: Optional `owner/name` repositories to restrict to.
     ///   - visibility: Optional `public` / `private` repository visibility.
+    ///   - updatedSince: When given, only issues updated at or after this moment (an incremental
+    ///     sync). Rendered as a UTC ISO-8601 timestamp, e.g. `updated:>=2026-11-18T14:00:00Z`.
     ///
     /// `is:issue` is always included. `involves:@me` alone also matches pull requests, which the
     /// app discards after downloading them; asking GitHub to exclude them avoids fetching (and
@@ -22,7 +24,8 @@ enum IssueSearchQuery {
         states: [IssueState]? = nil,
         allowReadOnly: Bool,
         repositoryFullNames: [String]? = nil,
-        visibility: String? = nil
+        visibility: String? = nil,
+        updatedSince: Date? = nil
     ) -> String {
         var parts = ["involves:@me", "is:issue", "sort:updated-desc"]
 
@@ -46,6 +49,18 @@ enum IssueSearchQuery {
             parts.append("is:\(visibility)")
         }
 
+        if let updatedSince {
+            parts.append("updated:>=\(timestamp(updatedSince))")
+        }
+
         return parts.joined(separator: " ")
+    }
+
+    /// `2026-11-18T14:00:00Z` — second precision, always UTC.
+    static func timestamp(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        return formatter.string(from: date)
     }
 }

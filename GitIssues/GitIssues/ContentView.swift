@@ -364,7 +364,7 @@ struct ContentView: View {
             if viewModel.viewModel == nil, let accessToken = authManager.getAccessToken() {
                 let newViewModel = IssuesListViewModel(accessToken: accessToken)
                 viewModel.viewModel = newViewModel
-                await newViewModel.loadIssues()
+                await newViewModel.loadInitialIssues()
                 newViewModel.startBackgroundSync()
             }
 
