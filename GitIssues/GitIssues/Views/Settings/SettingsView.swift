@@ -28,7 +28,9 @@ struct SettingsView: View {
                     SwiftUI.Label("Logging", systemImage: "doc.text.magnifyingglass")
                 }
         }
-        .frame(width: 540, height: 560)
+        // Tall enough for the General tab (the longest) without scrolling, including the optional
+        // "Reduce permissions" block.
+        .frame(width: 540, height: 740)
     }
 }
 
@@ -51,7 +53,7 @@ struct GeneralSettingsView: View {
 
     var body: some View {
         Form {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 16) {
                 // Appearance Section
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Appearance")

@@ -1,7 +1,8 @@
 # Issue #109 — Performance Plan
 
-Status: **Phases 0–2 complete, measured and committed (a Kanban move is now 1.4–2.1 s, was 3.3–4.3 s). Phase 4
-measured and committed. Phase 3 (disk cache + incremental sync) implemented, awaiting measurement.**
+Status: **All phases complete, measured and committed (a Kanban move is now 1.4–2.1 s, was 3.3–4.3 s; launch shows the
+cached list instantly, with one ~0.7 s incremental request; timer syncs are ~0.5–1 s, with a full reconcile every 10
+minutes). Phase 5 (body slimming) was dropped. Released as 1.2.0.**
 Branch: `feature/issue-109-performance`
 
 ## 1. Problem
@@ -148,7 +149,7 @@ Implementation notes / safeguards:
 * The move's open/closed decision now uses the freshly-read state rather than the cached one.
 The optimistic UI and revert-on-failure behaviour are unchanged. Multi-card drags speed up by the same factor.
 
-### Phase 3 — Persistent cache + incremental sync — implemented, awaiting measurement
+### Phase 3 — Persistent cache + incremental sync — complete
 
 1. **`IssueCacheStore`** keeps one JSON file, `Application Support/IssueCache/issues.json`, inside the app sandbox:
    the issue list plus `userLogin`, `savedAt`, `lastFullSyncAt`, `lastSyncAt`, the "allow read-only repos" setting it
@@ -177,11 +178,25 @@ The optimistic UI and revert-on-failure behaviour are unchanged. Multi-card drag
    reloads everything from GitHub. (It reloads rather than just deleting, because the app would otherwise
    immediately re-save its in-memory list.)
 
+Measured (Release build, 468 issues): cache load 10.5 ms; list visible at launch immediately; launch incremental
+sync 679 ms; timer syncs 0.5–1.1 s (one outlier 4.3 s); full reconcile ~9 s every 10 minutes.
+
+Two bugs found in manual testing and fixed:
+
+* **A locally-created issue deleted on github.com before any sync saw it stayed in the list for the whole session.**
+  `reconcile` re-injects every unconfirmed insertion into each complete result, and an insertion was only dropped
+  when the server returned it. Insertions now share the 30 s grace period of local edits
+  (`IssueSyncMerger.expireUnconfirmedInsertions`), after which a complete fetch that still lacks the issue wins.
+* **Opening an issue that was deleted elsewhere showed "Failed to decode response".** GitHub returns
+  `"issue": null` plus a `NOT_FOUND` error, which failed to decode. This is now `GraphQLError.notFound`, and the detail
+  view removes the issue from the list immediately (the list selection follows `allIssues`, so the pane closes).
+  A Kanban move of such a stale card still reports a decode error; left as is.
+
 Success measures from the log: `issue cache load` (a few tens of ms), list visible at launch without waiting for the
 network, `launch incremental sync … changed=N` taking ~1 s instead of ~8–11 s, and timer syncs logging
 `incremental sync` (one request) instead of `fetchAndApplyIssues TOTAL` (~8 s).
 
-### Phase 4 — Board CPU clean-up (justified by §2.4) — implemented, awaiting measurement
+### Phase 4 — Board CPU clean-up (justified by §2.4) — complete
 
 1. The order-marker regex is compiled once (`static let`) and skipped entirely for bodies that don't contain the
    marker literal. `Issue.kanbanOrderKey` is now a stored property computed when the issue is created (excluded from
