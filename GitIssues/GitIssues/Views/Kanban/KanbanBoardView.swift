@@ -56,15 +56,17 @@ struct KanbanBoardView: View {
         .animation(.default, value: viewModel.kanbanToastMessage)
     }
 
-    /// Issues per column: those whose placement resolves to that state. Manually-ordered issues
-    /// (with an order key) come first, sorted by key; unkeyed issues follow in filtered order.
+    /// Issues per column: those whose placement resolves to that state. With "Kanban Dragged" on,
+    /// manually-ordered issues (with an order key) come first, sorted by key; unkeyed issues follow in
+    /// filtered order. With it off, order keys are ignored and the selected sort applies alone.
     private func groupedColumns() -> [UUID: [Issue]] {
         let timer = PerfTimer()
         let columns = Kanban.columns(
             for: viewModel.filteredIssues,
             in: settings.states,
             closedState: settings.closedState,
-            defaultState: settings.defaultState
+            defaultState: settings.defaultState,
+            useDragOrder: viewModel.filterOptions.kanbanDragged
         )
         PerfTimer.log("kanban board grouping", timer, "issues=\(viewModel.filteredIssues.count)", slowAfterMs: 10)
         return columns
@@ -186,6 +188,20 @@ struct KanbanColumnView: View {
             toMove = [primary]
         }
 
+        // Kanban Dragged off: the column order is the selected sort, so there is no manual order to
+        // set. Cards dropped on another column still change state (no order key is written, so any
+        // stored order survives); cards already in this column stay where they are.
+        guard viewModel.filterOptions.kanbanDragged else {
+            let arriving = toMove.filter { KanbanSettingsService.shared.state(for: $0).id != state.id }
+            guard !arriving.isEmpty else { return }
+            if arriving.count == 1 {
+                Task { await viewModel.moveIssue(arriving[0], to: state, orderKey: nil) }
+            } else {
+                Task { await viewModel.moveIssues(arriving, to: state, orderKeys: arriving.map { _ in nil }) }
+            }
+            return
+        }
+
         // No-op: a single card dropped adjacent to itself in its own column.
         if toMove.count == 1,
            KanbanSettingsService.shared.state(for: primary).id == state.id,
@@ -194,27 +210,24 @@ struct KanbanColumnView: View {
             return
         }
 
-        // Neighbour keys, skipping any items being moved.
+        // The column without the cards being moved, and the drop point within it.
         let movingSet = Set(toMove)
-        var aboveKey: String?
-        var j = insertIndex - 1
-        while j >= 0 {
-            if !movingSet.contains(issues[j]) { aboveKey = issues[j].kanbanOrderKey; break }
-            j -= 1
-        }
-        var belowKey: String?
-        var k = insertIndex
-        while k < issues.count {
-            if !movingSet.contains(issues[k]) { belowKey = issues[k].kanbanOrderKey; break }
-            k += 1
+        let remaining = issues.filter { !movingSet.contains($0) }
+        let remainingIndex = issues[..<min(insertIndex, issues.count)].filter { !movingSet.contains($0) }.count
+
+        // Keys for the dropped cards, plus any neighbours that have to be re-keyed (they sit in this
+        // column already, so re-keying is a "move" to the state they are in).
+        let plan = KanbanDropPlanner.plan(column: remaining, index: remainingIndex, count: toMove.count)
+        let rekeyed = plan.rekeys.compactMap { rekey in
+            remaining.first { $0.id == rekey.issueID }.map { (issue: $0, key: rekey.key) }
         }
 
-        if toMove.count == 1 {
-            let key = FractionalIndex.keyBetween(aboveKey, belowKey)
-            Task { await viewModel.moveIssue(toMove[0], to: state, orderKey: key) }
+        if rekeyed.isEmpty && toMove.count == 1 {
+            Task { await viewModel.moveIssue(toMove[0], to: state, orderKey: plan.keys[0]) }
         } else {
-            let keys = FractionalIndex.keysBetween(aboveKey, belowKey, count: toMove.count)
-            Task { await viewModel.moveIssues(toMove, to: state, orderKeys: keys) }
+            let all = toMove + rekeyed.map(\.issue)
+            let keys: [String?] = plan.keys + rekeyed.map(\.key)
+            Task { await viewModel.moveIssues(all, to: state, orderKeys: keys) }
         }
     }
 }
