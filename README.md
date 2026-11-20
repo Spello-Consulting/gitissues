@@ -16,6 +16,16 @@ The first time you run the app you'll see a Connect to GitHub screen. Click the 
 
 By default, GitIssues only requests access to public repos (that you own or are collaborating on). If you also want to edit issues in your private repos, go the GitIssues > Settings... and turn on _Allow private repository access_. Your will be taken through the GitHub authorisation process again.
 
+## Labels
+
+Right-click an issue and choose **Labels…** to add or remove labels. The same item appears when several issues are selected (**Labels for N Issues…**, also available as a button in the multi-selection panel), including issues from different repositories.
+
+- Each label has a three-state checkbox: ticked (every selected issue has it), dashed (some do) or empty (none do). Click to change it: empty → add to all; ticked → remove from all; dashed → add to all, then remove from all, then back to leave as is.
+- **Save only changes the labels you clicked.** Labels you didn't touch stay as they are on every issue, so issues with different labels keep their differences.
+- Labels are matched across repositories **by name** (ignoring case). A label that only some of the selected repositories have is marked "in 2 of 3 repositories". Adding it to an issue in a repository that doesn't have it **creates the label there** (using the colour shown); the dialog tells you which repositories before you save.
+- The **+** button creates a new label in every selected repository that doesn't already have that name.
+- With several issues, the updates run in the background and appear in the progress bar at the bottom. Kanban labels (`kanban-…`) are never shown or changed here.
+
 ## Sorting
 
 The **Sort** menu in the filter bar offers six orders: Updated, Created or Issue # (each newest/high first or oldest/low first). What it does depends on the view:

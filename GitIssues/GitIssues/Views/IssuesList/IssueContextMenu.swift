@@ -14,6 +14,7 @@ struct IssueActions {
     var clone: (Issue) -> Void
     var assign: (Issue) -> Void
     var editLabels: (Issue) -> Void
+    var batchEditLabels: (Set<Issue>) -> Void
     var copyToRepo: ([Issue]) -> Void
     var moveToRepo: ([Issue]) -> Void
     var close: (Issue) -> Void
@@ -51,6 +52,12 @@ func issueContextMenu(for issue: Issue, selection: Set<Issue>, actions: IssueAct
             actions.batchAssign(selection)
         } label: {
             SwiftUI.Label("Assign \(selection.count) Issues", systemImage: "person.badge.plus")
+        }
+        .disabled(anyReadOnly)
+        Button {
+            actions.batchEditLabels(selection)
+        } label: {
+            SwiftUI.Label("Labels for \(selection.count) Issues…", systemImage: "tag")
         }
         .disabled(anyReadOnly)
         Button {
