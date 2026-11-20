@@ -13,10 +13,20 @@ private struct RefreshIssuesActionKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 
+private struct ReloadAllIssuesActionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
 extension FocusedValues {
     /// Starts a background refresh of the issues list. Published by the main window only.
     var refreshIssuesAction: (() -> Void)? {
         get { self[RefreshIssuesActionKey.self] }
         set { self[RefreshIssuesActionKey.self] = newValue }
+    }
+
+    /// Re-downloads every issue (a full sync). Published by the main window only.
+    var reloadAllIssuesAction: (() -> Void)? {
+        get { self[ReloadAllIssuesActionKey.self] }
+        set { self[ReloadAllIssuesActionKey.self] = newValue }
     }
 }

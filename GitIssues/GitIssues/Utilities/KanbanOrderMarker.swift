@@ -15,9 +15,16 @@ enum KanbanOrderMarker {
     /// Matches `<!-- gitissues:order=KEY -->` (key is any run of non-whitespace).
     private static let pattern = #"<!--\s*gitissues:order=([^\s]+)\s*-->"#
 
+    /// Compiled once. Compiling an `NSRegularExpression` is far costlier than running it, and the
+    /// marker is parsed for every issue (and was previously re-parsed on every board render).
+    private static let regex = try? NSRegularExpression(pattern: pattern)
+
+    /// Cheap literal that every marker contains; bodies without it skip the regex entirely.
+    private static let literal = "gitissues:order="
+
     /// The order key stored in `body`, if present.
     static func parse(from body: String?) -> String? {
-        guard let body, let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        guard let body, body.contains(literal), let regex else { return nil }
         let range = NSRange(body.startIndex..., in: body)
         guard let match = regex.firstMatch(in: body, range: range),
               match.numberOfRanges >= 2,
@@ -28,7 +35,9 @@ enum KanbanOrderMarker {
     /// `body` with any order marker (and surrounding whitespace) removed.
     static func strip(from body: String?) -> String {
         guard let body else { return "" }
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return body }
+        guard body.contains(literal), let regex else {
+            return body.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         let range = NSRange(body.startIndex..., in: body)
         let stripped = regex.stringByReplacingMatches(in: body, range: range, withTemplate: "")
         return stripped.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -40,9 +49,4 @@ enum KanbanOrderMarker {
         let marker = "<!-- gitissues:order=\(key) -->"
         return base.isEmpty ? marker : base + "\n\n" + marker
     }
-}
-
-extension Issue {
-    /// The Kanban order key stored in this issue's body, if any.
-    var kanbanOrderKey: String? { KanbanOrderMarker.parse(from: body) }
 }

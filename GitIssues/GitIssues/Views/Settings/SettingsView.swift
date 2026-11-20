@@ -28,7 +28,9 @@ struct SettingsView: View {
                     SwiftUI.Label("Logging", systemImage: "doc.text.magnifyingglass")
                 }
         }
-        .frame(width: 540, height: 560)
+        // Tall enough for the General tab (the longest) without scrolling, including the optional
+        // "Reduce permissions" block.
+        .frame(width: 540, height: 740)
     }
 }
 
@@ -51,7 +53,7 @@ struct GeneralSettingsView: View {
 
     var body: some View {
         Form {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 16) {
                 // Appearance Section
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Appearance")
@@ -146,6 +148,24 @@ struct GeneralSettingsView: View {
                         }
 
                     Text("When disabled, issues from archived or read-only repositories are hidden. When enabled, they're shown but their operations (edit, close, assign, delete, kanban moves) remain disabled.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Divider()
+
+                // Local issue cache (issue #109)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Local Cache")
+                        .font(.headline)
+
+                    Button("Clear Cache & Reload") {
+                        IssueCacheStore.shared.clear()
+                        NotificationCenter.default.post(name: .issueCacheCleared, object: nil)
+                    }
+
+                    Text("GitIssues keeps a copy of your issues on this Mac so the list appears instantly at launch, then updates it in the background. Clearing it deletes that copy and reloads everything from GitHub. Use this if the list ever looks out of date.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

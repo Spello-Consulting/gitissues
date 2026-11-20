@@ -111,4 +111,225 @@ final class IssueSyncMergerTests: XCTestCase {
 
         XCTAssertEqual(merged.map(\.title), ["Edited", "Other"])
     }
+
+    // MARK: - reconcile (issue #109: progressive loading)
+
+    private func reconcile(
+        incoming: [Issue],
+        deletions: inout Set<String>,
+        insertions: inout [Issue],
+        complete: Bool
+    ) -> [Issue] {
+        var updates: [String: PendingIssueUpdate] = [:]
+        return IssueSyncMerger.reconcile(
+            incoming: incoming,
+            pendingUpdates: &updates,
+            pendingDeletions: &deletions,
+            pendingInsertions: &insertions,
+            fetchStartedAt: t0,
+            isComplete: complete,
+            now: t0
+        )
+    }
+
+    func testPartialResultKeepsPendingDeletionHidden() {
+        // The deleted issue is absent from an early page only because it hasn't loaded yet; the
+        // deletion must not be treated as acknowledged, or it would reappear on a later page.
+        var deletions: Set<String> = ["gone"]
+        var insertions: [Issue] = []
+
+        let partial = reconcile(incoming: [Fixture.issue(id: "A")], deletions: &deletions, insertions: &insertions, complete: false)
+        XCTAssertEqual(deletions, ["gone"])
+        XCTAssertEqual(partial.map(\.id), ["A"])
+
+        let later = reconcile(
+            incoming: [Fixture.issue(id: "A"), Fixture.issue(id: "gone")],
+            deletions: &deletions, insertions: &insertions, complete: false
+        )
+        XCTAssertEqual(later.map(\.id), ["A"], "Pending deletion stays hidden when its page arrives")
+    }
+
+    func testCompleteResultAcknowledgesAbsentDeletion() {
+        var deletions: Set<String> = ["gone"]
+        var insertions: [Issue] = []
+
+        _ = reconcile(incoming: [Fixture.issue(id: "A")], deletions: &deletions, insertions: &insertions, complete: true)
+
+        XCTAssertTrue(deletions.isEmpty, "Server confirmed the deletion")
+    }
+
+    func testPartialResultPrependsUnconfirmedInsertionAndKeepsIt() {
+        let created = Fixture.issue(id: "new")
+        var deletions: Set<String> = []
+        var insertions = [created]
+
+        let partial = reconcile(incoming: [Fixture.issue(id: "A")], deletions: &deletions, insertions: &insertions, complete: false)
+
+        XCTAssertEqual(partial.map(\.id), ["new", "A"])
+        XCTAssertEqual(insertions.map(\.id), ["new"], "Still unconfirmed")
+    }
+
+    func testCompleteResultAcknowledgesPresentInsertionWithoutDuplicating() {
+        let created = Fixture.issue(id: "new")
+        var deletions: Set<String> = []
+        var insertions = [created]
+
+        let result = reconcile(
+            incoming: [Fixture.issue(id: "new"), Fixture.issue(id: "A")],
+            deletions: &deletions, insertions: &insertions, complete: true
+        )
+
+        XCTAssertEqual(result.map(\.id), ["new", "A"])
+        XCTAssertTrue(insertions.isEmpty)
+    }
+
+    // MARK: - applyIncremental (issue #109: incremental sync)
+
+    private func applyIncremental(
+        existing: [Issue],
+        changed: [Issue],
+        deletions: Set<String> = [],
+        insertions: inout [Issue],
+        updates: inout [String: PendingIssueUpdate]
+    ) -> [Issue] {
+        IssueSyncMerger.applyIncremental(
+            existing: existing,
+            changed: changed,
+            pendingUpdates: &updates,
+            pendingDeletions: deletions,
+            pendingInsertions: &insertions,
+            fetchStartedAt: t0,
+            now: t0
+        )
+    }
+
+    func testIncrementalReplacesChangedInPlaceAndLeavesTheRest() {
+        var insertions: [Issue] = []
+        var updates: [String: PendingIssueUpdate] = [:]
+        let existing = [Fixture.issue(id: "A", title: "a"), Fixture.issue(id: "B", title: "b"), Fixture.issue(id: "C", title: "c")]
+
+        let result = applyIncremental(
+            existing: existing,
+            changed: [Fixture.issue(id: "B", title: "b2")],
+            insertions: &insertions, updates: &updates
+        )
+
+        XCTAssertEqual(result.map(\.id), ["A", "B", "C"])
+        XCTAssertEqual(result.map(\.title), ["a", "b2", "c"])
+    }
+
+    func testIncrementalNeverTreatsAbsenceAsDeletion() {
+        var insertions: [Issue] = []
+        var updates: [String: PendingIssueUpdate] = [:]
+        let existing = [Fixture.issue(id: "A"), Fixture.issue(id: "B")]
+
+        let result = applyIncremental(existing: existing, changed: [], insertions: &insertions, updates: &updates)
+
+        XCTAssertEqual(result.map(\.id), ["A", "B"])
+    }
+
+    func testIncrementalInsertsNewIssuesAtFront() {
+        var insertions: [Issue] = []
+        var updates: [String: PendingIssueUpdate] = [:]
+
+        let result = applyIncremental(
+            existing: [Fixture.issue(id: "A")],
+            changed: [Fixture.issue(id: "N1"), Fixture.issue(id: "N2")],
+            insertions: &insertions, updates: &updates
+        )
+
+        XCTAssertEqual(result.map(\.id), ["N1", "N2", "A"])
+    }
+
+    func testIncrementalKeepsPendingLocalEditOverStaleServerCopy() {
+        let edited = Fixture.issue(id: "A", title: "Edited", updatedAt: t0.addingTimeInterval(5))
+        var updates = pending(edited, at: t0.addingTimeInterval(5))
+        var insertions: [Issue] = []
+
+        let result = IssueSyncMerger.applyIncremental(
+            existing: [edited],
+            changed: [Fixture.issue(id: "A", title: "Old", updatedAt: t0)],
+            pendingUpdates: &updates,
+            pendingDeletions: [],
+            pendingInsertions: &insertions,
+            fetchStartedAt: t0.addingTimeInterval(2),
+            now: t0.addingTimeInterval(6)
+        )
+
+        XCTAssertEqual(result.first?.title, "Edited")
+    }
+
+    func testIncrementalDoesNotReviveAPendingDeletion() {
+        var insertions: [Issue] = []
+        var updates: [String: PendingIssueUpdate] = [:]
+
+        let result = applyIncremental(
+            existing: [Fixture.issue(id: "A")],
+            changed: [Fixture.issue(id: "gone"), Fixture.issue(id: "A", title: "A2")],
+            deletions: ["gone"],
+            insertions: &insertions, updates: &updates
+        )
+
+        XCTAssertEqual(result.map(\.id), ["A"])
+        XCTAssertEqual(result.first?.title, "A2")
+    }
+
+    func testIncrementalAcknowledgesInsertionOnceServerReturnsIt() {
+        let created = Fixture.issue(id: "new")
+        let unconfirmed = Fixture.issue(id: "still-unconfirmed")
+        var insertions = [created, unconfirmed]
+        // `upsertIssueInCache` registers a pending update alongside every insertion.
+        var updates = pending(unconfirmed, at: t0)
+
+        // The list already shows both optimistic insertions (they were prepended when created).
+        _ = applyIncremental(
+            existing: insertions,
+            changed: [Fixture.issue(id: "new", title: "from server")],
+            insertions: &insertions, updates: &updates
+        )
+
+        XCTAssertEqual(insertions.map(\.id), ["still-unconfirmed"])
+    }
+
+    // A locally-created issue that the server never returns (deleted on github.com before any
+    // sync saw it) must not be re-injected forever.
+    func testCompleteResultExpiresInsertionOnceGracePeriodHasLapsed() {
+        let created = Fixture.issue(id: "new")
+        var insertions = [created]
+        var updates = pending(created, at: t0)
+        var deletions: Set<String> = []
+
+        let result = IssueSyncMerger.reconcile(
+            incoming: [Fixture.issue(id: "A")],
+            pendingUpdates: &updates,
+            pendingDeletions: &deletions,
+            pendingInsertions: &insertions,
+            fetchStartedAt: t0.addingTimeInterval(120),
+            isComplete: true,
+            now: t0.addingTimeInterval(120)
+        )
+
+        XCTAssertEqual(result.map(\.id), ["A"])
+        XCTAssertTrue(insertions.isEmpty)
+    }
+
+    func testCompleteResultKeepsInsertionWithinGracePeriod() {
+        let created = Fixture.issue(id: "new")
+        var insertions = [created]
+        var updates = pending(created, at: t0)
+        var deletions: Set<String> = []
+
+        let result = IssueSyncMerger.reconcile(
+            incoming: [Fixture.issue(id: "A")],
+            pendingUpdates: &updates,
+            pendingDeletions: &deletions,
+            pendingInsertions: &insertions,
+            fetchStartedAt: t0.addingTimeInterval(5),
+            isComplete: true,
+            now: t0.addingTimeInterval(5)
+        )
+
+        XCTAssertEqual(result.map(\.id), ["new", "A"], "Search index may not show it yet")
+        XCTAssertEqual(insertions.map(\.id), ["new"])
+    }
 }

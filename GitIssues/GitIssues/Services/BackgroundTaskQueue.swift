@@ -28,6 +28,8 @@ final class BackgroundTaskQueue: ObservableObject {
     private struct Operation {
         let title: String
         let work: @MainActor () async -> Void
+        /// When the operation joined the queue (perf instrumentation, issue #109).
+        let enqueuedAt = PerfTimer()
     }
 
     private var pending: [Operation] = []
@@ -84,7 +86,10 @@ final class BackgroundTaskQueue: ObservableObject {
             completedInRun += 1
             currentIndex = completedInRun
             currentTitle = op.title
+            let waited = op.enqueuedAt.elapsedString
+            let runTimer = PerfTimer()
             await op.work()
+            PerfTimer.log("queue op \(completedInRun)/\(total)", runTimer, "queueWait=\(waited)ms title=\"\(op.title)\"")
         }
         // Drained — reset so the progress bar hides.
         isRunning = false

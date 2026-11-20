@@ -20,6 +20,7 @@ class IssuesListViewModel: ObservableObject {
     @Published var viewerLogin: String?
 
     private let apiService: GitHubAPIService
+    private let cacheStore: IssueCacheStore
     let pinningService: PinningService // Made public so detail view can access it
     /// Serial queue for background GitHub mutations; drives the bottom progress bar.
     let taskQueue = BackgroundTaskQueue()
@@ -36,8 +37,20 @@ class IssuesListViewModel: ObservableObject {
     private var fetchSequence = 0
     private var lastAppliedFetchSequence = 0
 
-    init(accessToken: String) {
+    // Sync bookkeeping (issue #109): decides full vs incremental syncs and is persisted with the
+    // on-disk cache so it survives a relaunch.
+    /// When the last *complete* fetch started.
+    private var lastFullSyncAt: Date?
+    /// When the most recent fetch (full or incremental) started.
+    private var lastSyncAt: Date?
+    /// The cache store's generation when this view model started (or last reset); saves made under
+    /// an older generation (after a sign-out / cache clear) are dropped.
+    private var cacheGeneration: Int
+
+    init(accessToken: String, cacheStore: IssueCacheStore = .shared) {
         self.apiService = GitHubAPIService(accessToken: accessToken)
+        self.cacheStore = cacheStore
+        self.cacheGeneration = cacheStore.generation
         self.pinningService = PinningService()
         self.pinnedIssueIDs = pinningService.getPinnedIssues()
 
@@ -58,6 +71,21 @@ class IssuesListViewModel: ObservableObject {
             .dropFirst() // Skip initial value
             .sink { [weak self] newFilterOptions in
                 self?.appStateService.saveFilterState(newFilterOptions)
+            }
+            .store(in: &cancellables)
+
+        // Persist the issue list shortly after it settles, so the next launch can show it at once.
+        $allIssues
+            .dropFirst()
+            .debounce(for: .seconds(2), scheduler: DispatchQueue.main)
+            .sink { [weak self] _ in self?.saveCacheIfIdle() }
+            .store(in: &cancellables)
+
+        // "Clear Cache & Reload" in Settings.
+        NotificationCenter.default.publisher(for: .issueCacheCleared)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                Task { await self.resetAfterCacheCleared() }
             }
             .store(in: &cancellables)
 
@@ -89,15 +117,14 @@ class IssuesListViewModel: ObservableObject {
         }
         errorMessage = nil
 
+        let loadTimer = PerfTimer()
         do {
-            // Fetch viewer login if not already fetched
-            if viewerLogin == nil {
-                viewerLogin = try await apiService.fetchViewerLogin()
-            }
-
-            // Fetch all issues regardless of state/visibility — filtering is done client-side
-            let count = try await fetchAndApplyIssues()
+            // Fetch all issues regardless of state/visibility — filtering is done client-side.
+            // On a cold start (empty list) results are published page by page so the open issues
+            // appear after the first request instead of after every closed issue has downloaded.
+            let count = try await fetchAndApplyIssues(progressive: allIssues.isEmpty)
             AppLogger.shared.info("Loaded \(count) issues from GitHub")
+            PerfTimer.log("loadIssues TOTAL", loadTimer, "issues=\(count)")
         } catch {
             AppLogger.shared.error("Failed to load issues: \(error.localizedDescription)")
             self.errorMessage = error.localizedDescription
@@ -105,6 +132,165 @@ class IssuesListViewModel: ObservableObject {
 
         isLoading = false
         isRefreshing = false
+    }
+
+    // MARK: - Launch, cache and incremental sync (issue #109)
+
+    /// Launch entry point. Shows the cached issue list immediately (when there is one for this
+    /// account), then brings it up to date: a small incremental request if the cache is recent, or
+    /// a full reload if it is old, missing, or was fetched under different settings. With no cache
+    /// this is just `loadIssues()`.
+    func loadInitialIssues() async {
+        guard let snapshot = await restoreFromCache() else {
+            await loadIssues()
+            return
+        }
+
+        // Confirm the cache belongs to the signed-in account, concurrently with the refresh.
+        let verification = Task { try await self.apiService.fetchViewerLogin() }
+
+        switch SyncPlanner.mode(lastFullSyncAt: lastFullSyncAt, lastSyncAt: lastSyncAt) {
+        case .full:
+            await loadIssues()
+        case .incremental(let since):
+            await refreshIncrementally(since: since, label: "launch incremental sync")
+        }
+
+        // Different account than the cache was written for: throw it all away and start fresh.
+        if let login = try? await verification.value, login != snapshot.userLogin {
+            AppLogger.shared.warning("Issue cache belonged to another account; discarding")
+            cacheStore.clear()
+            cacheGeneration = cacheStore.generation
+            clearInMemoryIssues()
+            viewerLogin = login
+            await loadIssues()
+        }
+    }
+
+    /// User-initiated refresh (toolbar button, ⌘R). Follows the same rule as the background sync:
+    /// one small incremental request when the last full sync is recent, a full reload otherwise.
+    /// A deletion made elsewhere therefore shows up at the next full reconcile (within 10 minutes)
+    /// or immediately via `loadIssues()` ("Reload All Issues", ⇧⌘R).
+    func refreshIssues() async {
+        guard !isLoading, !isRefreshing else { return }
+        guard !allIssues.isEmpty else {
+            await loadIssues()
+            return
+        }
+        switch SyncPlanner.mode(lastFullSyncAt: lastFullSyncAt, lastSyncAt: lastSyncAt) {
+        case .full:
+            await loadIssues()
+        case .incremental(let since):
+            await refreshIncrementally(since: since, label: "manual incremental refresh")
+        }
+    }
+
+    /// Runs one incremental sync with the toolbar spinner showing, surfacing any error.
+    private func refreshIncrementally(since: Date, label: String) async {
+        isRefreshing = true
+        errorMessage = nil
+        let timer = PerfTimer()
+        do {
+            let changed = try await fetchAndApplyIncremental(since: since)
+            PerfTimer.log(label, timer, "changed=\(changed)")
+        } catch {
+            AppLogger.shared.error("\(label) failed: \(error.localizedDescription)")
+            errorMessage = error.localizedDescription
+        }
+        isRefreshing = false
+    }
+
+    /// Publishes the on-disk snapshot, if any. Returns it when the list was restored.
+    private func restoreFromCache() async -> CachedIssueSnapshot? {
+        guard allIssues.isEmpty, let snapshot = await cacheStore.load() else { return nil }
+        // Something else may have populated the list while the file was being read.
+        guard allIssues.isEmpty else { return nil }
+
+        viewerLogin = snapshot.userLogin
+        allIssues = snapshot.issues
+        lastSyncAt = snapshot.lastSyncAt
+        // A cache built under a different read-only setting may be missing (or wrongly contain)
+        // archived-repo issues; leaving the full-sync time unset forces a full reload.
+        lastFullSyncAt = snapshot.allowReadOnly == AppStateService.allowReadOnlyRepoAccess
+            ? snapshot.lastFullSyncAt
+            : nil
+        AppLogger.shared.info("Restored \(snapshot.issues.count) issues from cache")
+        return snapshot
+    }
+
+    /// Writes the current list to disk, unless a load or background mutation is still in flight
+    /// (the list may then be partial or hold an unconfirmed optimistic edit) or no full sync has
+    /// completed yet.
+    private func saveCacheIfIdle() {
+        guard !isLoading, !isRefreshing, !taskQueue.isProcessing,
+              !allIssues.isEmpty,
+              let login = viewerLogin,
+              let lastFullSyncAt, let lastSyncAt else { return }
+
+        cacheStore.save(
+            CachedIssueSnapshot(
+                schemaVersion: IssueCacheStore.schemaVersion,
+                userLogin: login,
+                savedAt: Date(),
+                lastFullSyncAt: lastFullSyncAt,
+                lastSyncAt: lastSyncAt,
+                allowReadOnly: AppStateService.allowReadOnlyRepoAccess,
+                issues: allIssues
+            ),
+            generation: cacheGeneration
+        )
+    }
+
+    /// Drops the in-memory list and sync state (after the cache was cleared or turned out to belong
+    /// to another account).
+    private func clearInMemoryIssues() {
+        allIssues = []
+        pendingDeletions = []
+        pendingInsertions = []
+        pendingUpdates = [:]
+        lastFullSyncAt = nil
+        lastSyncAt = nil
+    }
+
+    private func resetAfterCacheCleared() async {
+        cacheGeneration = cacheStore.generation
+        clearInMemoryIssues()
+        await loadIssues()
+    }
+
+    /// Fetches only issues updated since `since` and merges them into the list. Returns how many
+    /// changed issues came back.
+    @discardableResult
+    private func fetchAndApplyIncremental(since: Date) async throws -> Int {
+        fetchSequence += 1
+        let sequence = fetchSequence
+        let startedAt = Date()
+        let timer = PerfTimer()
+
+        if viewerLogin == nil {
+            viewerLogin = try await apiService.fetchViewerLogin()
+        }
+
+        let accumulator = IssueFetchAccumulator()
+        try await apiService.fetchIssuePages(state: nil, updatedSince: since) { accumulator.add($0) }
+        let changed = accumulator.snapshot
+
+        guard sequence > lastAppliedFetchSequence else { return changed.count }
+        lastAppliedFetchSequence = sequence
+
+        if !changed.isEmpty {
+            allIssues = IssueSyncMerger.applyIncremental(
+                existing: allIssues,
+                changed: changed,
+                pendingUpdates: &pendingUpdates,
+                pendingDeletions: pendingDeletions,
+                pendingInsertions: &pendingInsertions,
+                fetchStartedAt: startedAt
+            )
+        }
+        lastSyncAt = startedAt
+        PerfTimer.log("incremental sync", timer, "since=\(IssueSearchQuery.timestamp(since)) changed=\(changed.count) total=\(allIssues.count)")
+        return changed.count
     }
 
     // MARK: - Background Sync
@@ -135,10 +321,12 @@ class IssuesListViewModel: ObservableObject {
     private func syncIssuesSilently() async {
         guard !isLoading, !isRefreshing else { return }
         do {
-            if viewerLogin == nil {
-                viewerLogin = try await apiService.fetchViewerLogin()
+            switch SyncPlanner.mode(lastFullSyncAt: lastFullSyncAt, lastSyncAt: lastSyncAt) {
+            case .full:
+                _ = try await fetchAndApplyIssues(progressive: false)
+            case .incremental(let since):
+                try await fetchAndApplyIncremental(since: since)
             }
-            _ = try await fetchAndApplyIssues()
         } catch {
             // Silent sync — don't surface transient errors
         }
@@ -146,41 +334,85 @@ class IssuesListViewModel: ObservableObject {
 
     /// Fetches all issues and merges them into the cache. Returns the number of issues fetched.
     ///
+    /// Open and closed issues are fetched as two **concurrent** paged searches (cursor paging within
+    /// one search is serial, but two independent searches overlap), and the viewer login is fetched
+    /// alongside them rather than before them. When `progressive` is set, the list is published
+    /// after every page so the UI fills in as results arrive; otherwise (a refresh over existing
+    /// data) the list is swapped once at the end so rows never disappear mid-refresh.
+    ///
     /// The fetch is stamped with its start time and a sequence number so the merge can tell
     /// whether the response predates a local edit (see `IssueSyncMerger`), and so a response that
     /// arrives after a newer fetch has already been applied is discarded rather than rolling the
     /// list back.
-    private func fetchAndApplyIssues() async throws -> Int {
+    private func fetchAndApplyIssues(progressive: Bool) async throws -> Int {
         fetchSequence += 1
         let sequence = fetchSequence
         let startedAt = Date()
+        let fetchTimer = PerfTimer()
 
-        let issues = try await apiService.fetchAllIssues()
+        // The viewer login only feeds the client-side involvement filter; fetch it concurrently.
+        let viewerTask: Task<String, Error>? = viewerLogin == nil
+            ? Task { try await self.apiService.fetchViewerLogin() }
+            : nil
 
+        let accumulator = IssueFetchAccumulator()
+
+        /// Handles one arriving page. Runs on the main actor (as does everything in this type).
+        func handle(page: [Issue]) async {
+            accumulator.add(page)
+            guard progressive, sequence == fetchSequence, sequence > lastAppliedFetchSequence else { return }
+
+            // The involvement filter needs the login; it normally lands well before the first page.
+            if viewerLogin == nil, let viewerTask {
+                viewerLogin = try? await viewerTask.value
+            }
+
+            let publishTimer = PerfTimer()
+            publish(accumulator.snapshot, fetchStartedAt: startedAt, isComplete: false)
+            PerfTimer.log("progressive publish", publishTimer, "issues=\(accumulator.count)", slowAfterMs: 20)
+
+            // Drop the full-screen spinner as soon as there is something to show; the toolbar
+            // refresh indicator takes over while the remaining pages download.
+            if isLoading, !allIssues.isEmpty {
+                isLoading = false
+                isRefreshing = true
+                PerfTimer.log("first results visible", fetchTimer, "issues=\(allIssues.count)")
+            }
+        }
+
+        async let openCount = apiService.fetchIssuePages(state: .open) { await handle(page: $0) }
+        async let closedCount = apiService.fetchIssuePages(state: .closed) { await handle(page: $0) }
+        _ = try await (openCount, closedCount)
+
+        if let viewerTask {
+            viewerLogin = try await viewerTask.value
+        }
+
+        let issues = accumulator.snapshot
         guard sequence > lastAppliedFetchSequence else { return issues.count }
         lastAppliedFetchSequence = sequence
-        applyIssuesFromSync(issues, fetchStartedAt: startedAt)
+        // Time the merge + publish. `allIssues` publishes synchronously into the filter/sort
+        // pipeline, so this includes `applyFiltersAndSort` on the main thread.
+        let applyTimer = PerfTimer()
+        publish(issues, fetchStartedAt: startedAt, isComplete: true)
+        lastFullSyncAt = startedAt
+        lastSyncAt = startedAt
+        PerfTimer.log("applyIssuesFromSync (merge+filter+sort)", applyTimer, "issues=\(issues.count)")
+        PerfTimer.log("fetchAndApplyIssues TOTAL", fetchTimer, "issues=\(issues.count) progressive=\(progressive)")
         return issues.count
     }
 
-    /// Merges API-returned issues with any pending local mutations that may have raced ahead
-    /// of an in-flight sync: re-injects unconfirmed insertions, filters out pending deletions,
-    /// and keeps locally-edited issues that the response doesn't reflect yet.
-    private func applyIssuesFromSync(_ issues: [Issue], fetchStartedAt: Date) {
-        let incomingIDs = Set(issues.map { $0.id })
-
-        // Confirmed absent → deletion acknowledged, stop filtering
-        pendingDeletions = pendingDeletions.filter { incomingIDs.contains($0) }
-        // Confirmed present → insertion acknowledged, stop prepending
-        pendingInsertions = pendingInsertions.filter { !incomingIDs.contains($0.id) }
-
-        let merged = IssueSyncMerger.merge(
+    /// Publishes `issues` to `allIssues`, merged with any pending local mutations that may have
+    /// raced ahead of the in-flight fetch (see `IssueSyncMerger.reconcile`).
+    private func publish(_ issues: [Issue], fetchStartedAt: Date, isComplete: Bool) {
+        allIssues = IssueSyncMerger.reconcile(
             incoming: issues,
-            pending: &pendingUpdates,
-            fetchStartedAt: fetchStartedAt
+            pendingUpdates: &pendingUpdates,
+            pendingDeletions: &pendingDeletions,
+            pendingInsertions: &pendingInsertions,
+            fetchStartedAt: fetchStartedAt,
+            isComplete: isComplete
         )
-        let filtered = merged.filter { !pendingDeletions.contains($0.id) }
-        allIssues = pendingInsertions + filtered
     }
 
     // MARK: - Cache Mutations
@@ -188,6 +420,10 @@ class IssuesListViewModel: ObservableObject {
     /// Inserts or updates an issue in the local cache without a full reload.
     /// If the issue already exists it is updated in place; otherwise it is inserted at the front.
     func upsertIssueInCache(_ issue: Issue) {
+        // Includes the synchronous re-filter/re-sort triggered by the `allIssues` change.
+        let upsertTimer = PerfTimer()
+        defer { PerfTimer.log("upsertIssueInCache", upsertTimer, "issues=\(allIssues.count)", slowAfterMs: 20) }
+
         // Protect this edit from any sync response that doesn't reflect it yet.
         pendingUpdates[issue.id] = PendingIssueUpdate(issue: issue, appliedAt: Date())
 
@@ -211,27 +447,16 @@ class IssuesListViewModel: ObservableObject {
         pendingDeletions.insert(id)
     }
 
-    /// Removes any managed `kanban-<Status>` labels currently on the issue, so an issue closed
-    /// outside the Kanban board resolves to the Done (closed) column instead of lingering in its
-    /// old column. No-op when the issue carries no managed Kanban labels. Other users' `kanban-*`
-    /// labels (not part of this config) are left intact, mirroring `performKanbanMove`.
-    func clearManagedKanbanLabels(on issue: Issue) async {
-        let managed = KanbanSettingsService.shared.managedLabelNames
-        let labelsToRemove = issue.labels.filter { managed.contains($0.name.lowercased()) }
-        guard !labelsToRemove.isEmpty else { return }
-        do {
-            try await apiService.removeLabelsFromIssue(issueId: issue.id, labelIds: labelsToRemove.map { $0.id })
-        } catch {
-            AppLogger.shared.error("Failed to clear kanban labels on #\(issue.number): \(error.localizedDescription)")
-        }
-    }
-
-    /// Closes an issue via the API and immediately updates the local cache.
+    /// Closes an issue via the API and immediately updates the local cache. Any managed Kanban
+    /// label is removed in the same request so the closed issue lands in the Done column instead
+    /// of lingering in its old column; other users' `kanban-*` labels (not part of this config)
+    /// are left intact, mirroring `performKanbanMove`.
     func closeIssue(_ issue: Issue) async {
         do {
-            // Clear the managed Kanban label first so the closed issue lands in the Done column.
-            await clearManagedKanbanLabels(on: issue)
-            let updatedIssue = try await apiService.updateIssue(issueId: issue.id, title: nil, body: nil, state: .closed)
+            let updatedIssue = try await apiService.closeIssue(
+                issue,
+                managedLabelNames: KanbanSettingsService.shared.managedLabelNames
+            )
             upsertIssueInCache(updatedIssue)
             AppLogger.shared.info("Closed issue #\(issue.number) (\(issue.repository.fullName))")
         } catch {
@@ -430,48 +655,88 @@ class IssuesListViewModel: ObservableObject {
     /// labels are left intact.
     private func performKanbanMove(_ issue: Issue, to state: KanbanState, orderKey: String, revertTo original: Issue) async {
         let settings = KanbanSettingsService.shared
-        do {
-            // Fetch the latest issue so we act on current labels/body (minimises clobber).
-            let (current, _) = try await apiService.fetchIssueDetail(
+        let moveTimer = PerfTimer()
+        var step = PerfTimer()
+        var steps: [String] = []
+        func lap(_ name: String) {
+            steps.append("\(name)=\(step.elapsedString)ms")
+            step = PerfTimer()
+        }
+
+        /// One read-modify-write: read the issue's current labels/body, then write the new labels,
+        /// body marker and open/closed state in a **single** `updateIssue` mutation. Each GitHub
+        /// mutation costs ~1–1.5 s, so this replaced a remove-labels / add-labels / update chain
+        /// (plus a second full re-read; the mutation response already is the canonical issue).
+        func attempt() async throws -> Issue {
+            // Read the latest issue so we act on current labels/body (minimises clobber). Uses the
+            // lightweight query: all labels (the replacement set must be complete), no comments.
+            let current = try await apiService.fetchIssueForUpdate(
                 owner: issue.repository.owner.login,
                 repo: issue.repository.name,
                 number: issue.number
             )
+            lap("read")
 
-            // 1. Remove the managed Kanban labels currently on the issue.
-            let managed = settings.managedLabelNames
-            let labelsToRemove = current.labels.filter { managed.contains($0.name.lowercased()) }
-            if !labelsToRemove.isEmpty {
-                try await apiService.removeLabelsFromIssue(issueId: issue.id, labelIds: labelsToRemove.map { $0.id })
-            }
-
-            // 2. Add the target label unless this is the clutter-free default or closed state.
+            // The target label, unless this is the clutter-free default or closed state. Label ids
+            // come from a per-repository cache, so only the first move in a repo pays for a lookup.
             let isClutterFree = state.id == settings.defaultState.id || state.isClosed
+            var target: Label?
             if !isClutterFree {
-                let label = try await apiService.ensureLabel(
+                target = try await apiService.ensureLabel(
                     in: issue.repository,
                     name: Kanban.labelName(for: state),
                     color: settings.color(for: state)
                 )
-                try await apiService.addLabelsToIssue(issueId: issue.id, labelIds: [label.id])
+                lap("ensureLabel")
             }
 
-            // 3. Write the order key into the body marker, and flip open/closed to match the column.
-            let newState: IssueState? = (state.isClosed != (issue.state == .closed))
+            // Managed Kanban labels are swapped for the target; other users' labels are kept. `nil`
+            // means the set is unchanged (e.g. reordering within a column), so labels are not sent.
+            let labelIds = KanbanMovePlanner.labelUpdate(
+                currentLabels: current.labels,
+                managedLabelNames: settings.managedLabelNames,
+                adding: target
+            )
+
+            // Write the order key into the body marker, and flip open/closed to match the column.
+            let newState: IssueState? = (state.isClosed != (current.state == .closed))
                 ? (state.isClosed ? .closed : .open)
                 : nil
             let newBody = KanbanOrderMarker.inject(orderKey, into: current.body)
-            _ = try await apiService.updateIssue(issueId: issue.id, title: nil, body: newBody, state: newState)
-
-            // 4. Re-fetch the canonical issue and reconcile the cache (real label IDs, etc.).
-            let (updated, _) = try await apiService.fetchIssueDetail(
-                owner: issue.repository.owner.login,
-                repo: issue.repository.name,
-                number: issue.number
+            let updated = try await apiService.updateIssue(
+                issueId: issue.id, title: nil, body: newBody, state: newState, labelIds: labelIds
             )
+            lap("updateIssue")
+            return updated
+        }
+
+        do {
+            let updated: Issue
+            do {
+                updated = try await attempt()
+            } catch GraphQLError.notFound {
+                // The issue was deleted elsewhere: nothing to move or retry. Drop the stale card.
+                PerfTimer.log("kanbanMove NOT FOUND", moveTimer, steps.joined(separator: " "))
+                AppLogger.shared.info("Issue #\(issue.number) no longer exists on GitHub; removing it from the list")
+                removeIssueFromCache(id: issue.id)
+                errorMessage = "Issue #\(issue.number) no longer exists on GitHub, so it was removed from the list."
+                return
+            } catch {
+                // A cached label id may be stale (label deleted/renamed on github.com). Drop the
+                // repository's cached labels and retry once with a fresh lookup; if nothing was
+                // cached the failure is genuine.
+                guard apiService.invalidateLabelCache(for: issue.repository) else { throw error }
+                AppLogger.shared.warning("Kanban move of #\(issue.number) failed (\(error.localizedDescription)); retrying with fresh labels")
+                steps.append("retry")
+                step = PerfTimer()
+                updated = try await attempt()
+            }
             upsertIssueInCache(updated)
+            lap("upsert")
+            PerfTimer.log("kanbanMove TOTAL", moveTimer, steps.joined(separator: " "))
             AppLogger.shared.info("Moved issue #\(issue.number) (\(issue.repository.fullName)) to kanban state '\(state.name)'")
         } catch {
+            PerfTimer.log("kanbanMove FAILED", moveTimer, steps.joined(separator: " "))
             AppLogger.shared.error("Failed to move issue #\(issue.number) to '\(state.name)': \(error.localizedDescription)")
             errorMessage = error.localizedDescription
             // Revert the optimistic change.
@@ -630,6 +895,9 @@ class IssuesListViewModel: ObservableObject {
 
     /// Applies filters and sorting to issues
     private static func applyFiltersAndSort(filterOptions: FilterOptions, to issues: [Issue], pinnedIDs: Set<String>, viewerLogin: String?) -> [Issue] {
+        let timer = PerfTimer()
+        defer { PerfTimer.log("applyFiltersAndSort", timer, "in=\(issues.count)", slowAfterMs: 10) }
+
         // Filter issues
         let filtered = issues.filter { filterOptions.matches(issue: $0, viewerLogin: viewerLogin) }
 

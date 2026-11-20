@@ -16,9 +16,13 @@ enum GraphQLError: LocalizedError {
     case graphQLErrors([String])
     case unauthorized
     case rateLimited(reset: Date?)
+    /// GitHub reported the requested object does not exist (e.g. an issue deleted elsewhere).
+    case notFound
 
     var errorDescription: String? {
         switch self {
+        case .notFound:
+            return "This item no longer exists on GitHub."
         case .noAccessToken:
             return "No access token available. Please sign in."
         case .invalidURL:
@@ -63,6 +67,11 @@ struct GraphQLResponse<T: Codable>: Codable {
 
 struct GraphQLResponseError: Codable {
     let message: String
+    /// GitHub's machine-readable error class, e.g. `NOT_FOUND`, `FORBIDDEN`.
+    let type: String?
+
+    var isNotFound: Bool { type == "NOT_FOUND" }
+
     let path: [String]?
     let locations: [Location]?
 
@@ -135,6 +144,16 @@ class GraphQLClient {
         self.accessToken = accessToken
     }
 
+    /// The operation name in a GraphQL document (e.g. `AllIssues`), for logging. Documents that
+    /// contain several operations (aliased mutations) report the first one.
+    private static func operationName(in query: String) -> String {
+        let tokens = query.split(whereSeparator: { $0.isWhitespace || $0 == "(" || $0 == "{" })
+        for (index, token) in tokens.enumerated() where token == "query" || token == "mutation" {
+            if index + 1 < tokens.count { return String(tokens[index + 1]) }
+        }
+        return "anonymous"
+    }
+
     /// Executes a GraphQL query and decodes `data`.
     /// - Parameter tolerateErrors: When `true`, a response that carries both `errors` and usable
     ///   `data` (GitHub reports e.g. an unreadable cross-referenced repository this way) is
@@ -157,11 +176,29 @@ class GraphQLClient {
         let graphQLRequest = GraphQLRequest<T>(query: query, variables: variables)
         request.httpBody = try JSONEncoder().encode(graphQLRequest)
 
+        // Perf instrumentation (issue #109): one line per call with network, size and decode time.
+        let operation = Self.operationName(in: query)
+        let networkTimer = PerfTimer()
+        var networkMs = 0.0
+        var decodeMs = 0.0
+        var bytes = 0
+        var status = 0
+        defer {
+            PerfTimer.log(
+                "graphql \(operation)",
+                networkTimer,
+                "net=\(PerfTimer.format(networkMs))ms decode=\(PerfTimer.format(decodeMs))ms bytes=\(bytes) http=\(status)"
+            )
+        }
+
         let (data, response) = try await URLSession.shared.data(for: request)
+        networkMs = networkTimer.elapsedMs
+        bytes = data.count
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw GraphQLError.serverError("Invalid response")
         }
+        status = httpResponse.statusCode
 
         // Handle common HTTP errors
         if httpResponse.statusCode == 401 {
@@ -187,6 +224,9 @@ class GraphQLClient {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
 
+        let decodeTimer = PerfTimer()
+        defer { decodeMs = decodeTimer.elapsedMs }
+
         do {
             let graphQLResponse = try decoder.decode(GraphQLResponse<T>.self, from: data)
 
@@ -197,6 +237,9 @@ class GraphQLClient {
                     return partial
                 }
                 AppLogger.shared.error("GraphQL errors: \(errorMessages.joined(separator: "; "))")
+                if errors.contains(where: { $0.isNotFound }) {
+                    throw GraphQLError.notFound
+                }
                 throw GraphQLError.graphQLErrors(errorMessages)
             }
 

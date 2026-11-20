@@ -28,6 +28,7 @@ enum Fixture {
     static func issue(
         id: String = "I_1",
         title: String = "Title",
+        body: String? = nil,
         state: IssueState = .open,
         labels: [String] = [],
         updatedAt: Date = Fixture.epoch,
@@ -37,7 +38,7 @@ enum Fixture {
             id: id,
             number: 1,
             title: title,
-            body: nil,
+            body: body,
             state: state,
             createdAt: Fixture.epoch,
             updatedAt: updatedAt,

@@ -17,6 +17,8 @@ class GitHubAPIService {
 
     private let graphQLClient: GraphQLClient
     private let accessToken: String
+    /// Per-repository label ids for Kanban moves (issue #109).
+    private var labelCache = RepositoryLabelCache()
 
     init(accessToken: String) {
         self.accessToken = accessToken
@@ -33,7 +35,11 @@ class GitHubAPIService {
         return response.viewer.login
     }
 
-    /// Fetches all issues involving the authenticated user using search
+    /// Issues per search request. 100 is GitHub's maximum; larger pages mean fewer round trips,
+    /// and per-request latency (~1.5 s) rather than payload size dominates load time (issue #109).
+    static let issuesPageSize = 100
+
+    /// Fetches one page of issues involving the authenticated user using search.
     /// - Parameters:
     ///   - states: Filter by issue state (open, closed, or nil for all)
     ///   - repositoryFullNames: Filter by specific repositories (e.g., ["owner/repo1", "owner/repo2"])
@@ -44,44 +50,18 @@ class GitHubAPIService {
         states: [IssueState]? = nil,
         repositoryFullNames: [String]? = nil,
         visibility: String? = nil,
+        updatedSince: Date? = nil,
         cursor: String? = nil
     ) async throws -> (issues: [Issue], hasNextPage: Bool, endCursor: String?) {
-        // Build search query string
-        var queryParts = ["involves:@me", "sort:updated-desc"]
+        let searchQuery = IssueSearchQuery.build(
+            states: states,
+            allowReadOnly: AppStateService.allowReadOnlyRepoAccess,
+            repositoryFullNames: repositoryFullNames,
+            visibility: visibility,
+            updatedSince: updatedSince
+        )
 
-        // Exclude archived (read-only) repositories unless the user has opted in.
-        if !AppStateService.allowReadOnlyRepoAccess {
-            queryParts.append("archived:false")
-        }
-
-        // Add state filter
-        if let states = states {
-            let stateStrings = states.map { state -> String in
-                switch state {
-                case .open: return "is:open"
-                case .closed: return "is:closed"
-                }
-            }
-            if stateStrings.count == 1 {
-                queryParts.append(stateStrings[0])
-            }
-            // If both open and closed, don't add state filter (shows all)
-        }
-
-        // Add repository filter
-        if let repos = repositoryFullNames, !repos.isEmpty {
-            let repoQuery = repos.map { "repo:\($0)" }.joined(separator: " ")
-            queryParts.append(repoQuery)
-        }
-
-        // Add visibility filter
-        if let visibility = visibility {
-            queryParts.append("is:\(visibility)")
-        }
-
-        let searchQuery = queryParts.joined(separator: " ")
-
-        var variables: [String: Any] = ["query": searchQuery]
+        var variables: [String: Any] = ["query": searchQuery, "first": Self.issuesPageSize]
 
         if let cursor = cursor {
             variables["cursor"] = cursor
@@ -92,48 +72,54 @@ class GitHubAPIService {
             variables: variables
         )
 
-        // Filter out nil nodes (non-Issue types like PRs that don't match the inline fragment)
+        // Defensive: the search is restricted to issues (`is:issue`), but skip any node that still
+        // fails to decode as an Issue.
         let issues = response.search.nodes.compactMap { $0?.toIssue() }
         let pageInfo = response.search.pageInfo
 
         return (issues, pageInfo.hasNextPage, pageInfo.endCursor)
     }
 
-    /// Fetches all issues across all pages
-    /// - Parameters:
-    ///   - states: Filter by issue state (open, closed, or nil for all)
-    ///   - repositoryFullNames: Filter by specific repositories (e.g., ["owner/repo1", "owner/repo2"])
-    ///   - visibility: Filter by repository visibility (public, private, or nil for all)
-    /// - Returns: Array of all issues
-    func fetchAllIssues(
-        states: [IssueState]? = nil,
-        repositoryFullNames: [String]? = nil,
-        visibility: String? = nil
-    ) async throws -> [Issue] {
-        var allIssues: [Issue] = []
+    /// Pages through every issue in `state` (or all states when `nil`), handing each page to
+    /// `onPage` as soon as it arrives so callers can show results progressively.
+    ///
+    /// Cursor pagination within one search is inherently sequential, so callers that want speed run
+    /// separate streams concurrently (the view model runs open and closed together).
+    ///
+    /// Pages are de-duplicated: GitHub search results can shift between pages (e.g. when cloning
+    /// changes `updatedAt` timestamps mid-pagination), causing the same issue to appear on two pages.
+    /// - Returns: The number of distinct issues delivered.
+    @discardableResult
+    func fetchIssuePages(
+        state: IssueState?,
+        updatedSince: Date? = nil,
+        onPage: (_ page: [Issue]) async -> Void
+    ) async throws -> Int {
+        let label = (state.map { $0 == .open ? "open" : "closed" } ?? "all") + (updatedSince == nil ? "" : "+incremental")
+        let totalTimer = PerfTimer()
         var seenIDs = Set<String>()
         var cursor: String? = nil
         var hasNextPage = true
+        var pageCount = 0
 
         while hasNextPage {
+            let pageTimer = PerfTimer()
             let (issues, nextPage, nextCursor) = try await fetchIssues(
-                states: states,
-                repositoryFullNames: repositoryFullNames,
-                visibility: visibility,
+                states: state.map { [$0] },
+                updatedSince: updatedSince,
                 cursor: cursor
             )
+            pageCount += 1
+            let fresh = issues.filter { seenIDs.insert($0.id).inserted }
+            PerfTimer.log("fetchIssues[\(label)] page \(pageCount)", pageTimer, "issues=\(fresh.count) hasNext=\(nextPage)")
 
-            // Deduplicate: GitHub search results can shift between pages (e.g. when cloning
-            // changes updatedAt timestamps mid-pagination), causing the same issue to appear
-            // on multiple pages.
-            for issue in issues where seenIDs.insert(issue.id).inserted {
-                allIssues.append(issue)
-            }
+            await onPage(fresh)
             hasNextPage = nextPage
             cursor = nextCursor
         }
 
-        return allIssues
+        PerfTimer.log("fetchIssuePages[\(label)] TOTAL", totalTimer, "pages=\(pageCount) issues=\(seenIDs.count)")
+        return seenIDs.count
     }
 
     /// Fetches a specific issue with its comments
@@ -158,10 +144,24 @@ class GitHubAPIService {
             variables: variables
         )
 
-        let issue = response.repository.issue.toIssue()
-        let comments = response.repository.issue.toComments()
+        guard let node = response.repository?.issue else {
+            throw GraphQLError.notFound
+        }
 
-        return (issue, comments)
+        return (node.toIssue(), node.toComments())
+    }
+
+    /// Reads one issue for a read-modify-write (e.g. a Kanban move): all its labels, no comments.
+    /// Roughly half the cost of `fetchIssueDetail`'s payload and enough for the move logic.
+    func fetchIssueForUpdate(owner: String, repo: String, number: Int) async throws -> Issue {
+        let response: IssueForUpdateResponse = try await graphQLClient.execute(
+            query: GraphQLQueries.issueForUpdateQuery,
+            variables: ["owner": owner, "repo": repo, "number": number]
+        )
+        guard let node = response.repository?.issue else {
+            throw GraphQLError.notFound
+        }
+        return node.toIssue()
     }
 
     /// Fetches an issue's activity log: label/assignee/state changes, renames, cross-references, ...
@@ -242,9 +242,16 @@ class GitHubAPIService {
         issueId: String,
         title: String?,
         body: String?,
-        state: IssueState?
+        state: IssueState?,
+        labelIds: [String]? = nil
     ) async throws -> Issue {
         var variables: [String: Any] = ["id": issueId]
+
+        // When given, `labelIds` REPLACES the issue's whole label set (an empty array clears it).
+        // Callers must pass the complete intended set; omit it to leave labels untouched.
+        if let labelIds = labelIds {
+            variables["labelIds"] = labelIds
+        }
 
         // Validate and add title if provided
         if let title = title {
@@ -613,13 +620,60 @@ class GitHubAPIService {
 
     /// Finds a label by name in a repository, creating it if it doesn't exist. Case-insensitive match.
     /// Used to ensure a Kanban state label (`kanban-<Status>`) exists before assigning it.
+    ///
+    /// The repository's labels are listed once and cached for the session, so only the first move in
+    /// a repository pays for the lookup. See `invalidateLabelCache(for:)` for staleness handling.
     /// - Returns: The existing or newly created label.
     func ensureLabel(in repository: Repository, name: String, color: String) async throws -> Label {
-        let existing = try await fetchAllRepositoryLabels(owner: repository.owner.login, repo: repository.name)
-        if let match = existing.first(where: { $0.name.lowercased() == name.lowercased() }) {
-            return match
+        if let cached = labelCache.label(named: name, repositoryID: repository.id) {
+            return cached
         }
-        return try await createLabel(repositoryId: repository.id, name: name, color: color)
+
+        if !labelCache.isPopulated(repositoryID: repository.id) {
+            let existing = try await fetchAllRepositoryLabels(owner: repository.owner.login, repo: repository.name)
+            labelCache.store(existing, repositoryID: repository.id)
+            if let match = labelCache.label(named: name, repositoryID: repository.id) {
+                return match
+            }
+        }
+
+        let created = try await createLabel(repositoryId: repository.id, name: name, color: color)
+        labelCache.insert(created, repositoryID: repository.id)
+        return created
+    }
+
+    /// Drops the cached labels for `repository` after a write that relied on them failed (the
+    /// cache may be stale, e.g. a label was deleted on github.com).
+    /// - Returns: `true` if cached data existed, i.e. retrying with a fresh lookup could help.
+    @discardableResult
+    func invalidateLabelCache(for repository: Repository) -> Bool {
+        labelCache.invalidate(repositoryID: repository.id)
+    }
+
+    /// Closes an issue, removing any managed Kanban labels in the same request so it lands in the
+    /// Done column. One `updateIssue` mutation (~1 s) instead of remove-labels + update (~2.5 s).
+    ///
+    /// The label set is replaced from `issue.labels`, which comes from the list query and is cut
+    /// off at `KanbanMovePlanner.possiblyTruncatedLabelCount`; an issue that might have more labels
+    /// than that takes the slower targeted-removal route so no label can be lost.
+    func closeIssue(_ issue: Issue, managedLabelNames: Set<String>) async throws -> Issue {
+        let labelsToRemove = issue.labels.filter { managedLabelNames.contains($0.name.lowercased()) }
+
+        if labelsToRemove.isEmpty {
+            return try await updateIssue(issueId: issue.id, title: nil, body: nil, state: .closed)
+        }
+
+        if issue.labels.count < KanbanMovePlanner.possiblyTruncatedLabelCount {
+            let labelIds = KanbanMovePlanner.labelUpdate(
+                currentLabels: issue.labels,
+                managedLabelNames: managedLabelNames,
+                adding: nil
+            )
+            return try await updateIssue(issueId: issue.id, title: nil, body: nil, state: .closed, labelIds: labelIds)
+        }
+
+        try await removeLabelsFromIssue(issueId: issue.id, labelIds: labelsToRemove.map(\.id))
+        return try await updateIssue(issueId: issue.id, title: nil, body: nil, state: .closed)
     }
 
     /// Copies an issue into the destination repository, transferring the title, description,
