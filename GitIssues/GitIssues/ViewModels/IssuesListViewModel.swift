@@ -153,17 +153,7 @@ class IssuesListViewModel: ObservableObject {
         case .full:
             await loadIssues()
         case .incremental(let since):
-            isRefreshing = true
-            errorMessage = nil
-            let timer = PerfTimer()
-            do {
-                let changed = try await fetchAndApplyIncremental(since: since)
-                PerfTimer.log("launch incremental sync", timer, "changed=\(changed)")
-            } catch {
-                AppLogger.shared.error("Launch sync failed: \(error.localizedDescription)")
-                errorMessage = error.localizedDescription
-            }
-            isRefreshing = false
+            await refreshIncrementally(since: since, label: "launch incremental sync")
         }
 
         // Different account than the cache was written for: throw it all away and start fresh.
@@ -175,6 +165,39 @@ class IssuesListViewModel: ObservableObject {
             viewerLogin = login
             await loadIssues()
         }
+    }
+
+    /// User-initiated refresh (toolbar button, ⌘R). Follows the same rule as the background sync:
+    /// one small incremental request when the last full sync is recent, a full reload otherwise.
+    /// A deletion made elsewhere therefore shows up at the next full reconcile (within 10 minutes)
+    /// or immediately via `loadIssues()` ("Reload All Issues", ⇧⌘R).
+    func refreshIssues() async {
+        guard !isLoading, !isRefreshing else { return }
+        guard !allIssues.isEmpty else {
+            await loadIssues()
+            return
+        }
+        switch SyncPlanner.mode(lastFullSyncAt: lastFullSyncAt, lastSyncAt: lastSyncAt) {
+        case .full:
+            await loadIssues()
+        case .incremental(let since):
+            await refreshIncrementally(since: since, label: "manual incremental refresh")
+        }
+    }
+
+    /// Runs one incremental sync with the toolbar spinner showing, surfacing any error.
+    private func refreshIncrementally(since: Date, label: String) async {
+        isRefreshing = true
+        errorMessage = nil
+        let timer = PerfTimer()
+        do {
+            let changed = try await fetchAndApplyIncremental(since: since)
+            PerfTimer.log(label, timer, "changed=\(changed)")
+        } catch {
+            AppLogger.shared.error("\(label) failed: \(error.localizedDescription)")
+            errorMessage = error.localizedDescription
+        }
+        isRefreshing = false
     }
 
     /// Publishes the on-disk snapshot, if any. Returns it when the list was restored.
@@ -691,6 +714,13 @@ class IssuesListViewModel: ObservableObject {
             let updated: Issue
             do {
                 updated = try await attempt()
+            } catch GraphQLError.notFound {
+                // The issue was deleted elsewhere: nothing to move or retry. Drop the stale card.
+                PerfTimer.log("kanbanMove NOT FOUND", moveTimer, steps.joined(separator: " "))
+                AppLogger.shared.info("Issue #\(issue.number) no longer exists on GitHub; removing it from the list")
+                removeIssueFromCache(id: issue.id)
+                errorMessage = "Issue #\(issue.number) no longer exists on GitHub, so it was removed from the list."
+                return
             } catch {
                 // A cached label id may be stale (label deleted/renamed on github.com). Drop the
                 // repository's cached labels and retry once with a fresh lookup; if nothing was

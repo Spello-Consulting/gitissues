@@ -1165,10 +1165,12 @@ struct UpdateIssueResponse: Codable {
 /// Response of `GraphQLQueries.issueForUpdateQuery`. Shares its issue node type with the
 /// `updateIssue` mutation payload, since both select the same fields.
 struct IssueForUpdateResponse: Codable {
-    let repository: RepositoryNode
+    /// Both optional so an issue deleted elsewhere (`"issue": null` plus a `NOT_FOUND` error)
+    /// decodes and surfaces as `GraphQLError.notFound` instead of a decoding failure.
+    let repository: RepositoryNode?
 
     struct RepositoryNode: Codable {
-        let issue: UpdateIssueResponse.IssueNode
+        let issue: UpdateIssueResponse.IssueNode?
     }
 }
 

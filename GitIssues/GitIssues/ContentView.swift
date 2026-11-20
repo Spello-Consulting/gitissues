@@ -88,8 +88,16 @@ struct ContentView: View {
         )
     }
 
-    /// Cmd+R: background refresh. `nil` while a load is already in flight (disables the menu item).
+    /// Cmd+R: refresh (incremental when the last full sync is recent). `nil` while a load is
+    /// already in flight (disables the menu item).
     private var refreshAction: (() -> Void)? {
+        guard let vm = viewModel.viewModel, !vm.isLoading, !vm.isRefreshing else { return nil }
+        return { Task { await vm.refreshIssues() } }
+    }
+
+    /// Shift+Cmd+R: re-download every issue, which also notices issues deleted or transferred
+    /// elsewhere. `nil` while a load is already in flight.
+    private var reloadAllAction: (() -> Void)? {
         guard let vm = viewModel.viewModel, !vm.isLoading, !vm.isRefreshing else { return nil }
         return { Task { await vm.loadIssues() } }
     }
@@ -286,7 +294,7 @@ struct ContentView: View {
                     .help("Create new issue")
 
                     Button {
-                        Task { await viewModel.viewModel?.loadIssues() }
+                        Task { await viewModel.viewModel?.refreshIssues() }
                     } label: {
                         if viewModel.viewModel?.isRefreshing == true {
                             ProgressView()
@@ -296,7 +304,7 @@ struct ContentView: View {
                         }
                     }
                     .disabled(viewModel.viewModel?.isLoading == true || viewModel.viewModel?.isRefreshing == true)
-                    .help("Refresh issues")
+                    .help("Refresh issues (⌘R). Reload all issues: ⇧⌘R")
 
                     Button {
                         authManager.signOut()
@@ -391,6 +399,7 @@ struct ContentView: View {
             }
         }
         .focusedSceneValue(\.refreshIssuesAction, refreshAction)
+        .focusedSceneValue(\.reloadAllIssuesAction, reloadAllAction)
         .background(WindowAccessor { window in
             // Use macOS native window frame autosave
             window.setFrameAutosaveName("MainWindow")

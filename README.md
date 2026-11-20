@@ -22,7 +22,8 @@ GitIssues keeps a copy of your issue list on your Mac (a single JSON file in the
 
 - **Launch is fast.** The cached list appears immediately. If the cache is under 10 minutes old, the app then makes one small request for anything that changed; otherwise it reloads everything in the background while you work.
 - **Background sync is incremental.** Each sync (every 30 seconds by default, see _Background Sync_ in Settings) fetches only issues updated since the last one, and merges them in. Every 10 minutes it does a full reload, which is how issues deleted or transferred on github.com disappear from the list.
-- **Issues you delete elsewhere clean themselves up.** If you open an issue that no longer exists on GitHub, it is removed from the list straight away.
+- **Refresh is incremental too.** The toolbar button and ⌘R make the same one small request. To re-download everything (for example to pick up an issue you deleted on github.com right now), use View > **Reload All Issues** (⇧⌘R).
+- **Issues you delete elsewhere clean themselves up.** If you open an issue, or drag its Kanban card, and it no longer exists on GitHub, it is removed from the list straight away.
 
 The cache is deleted when you sign out or change the private-repository permission. If the list ever looks out of date, go to GitIssues > Settings... > General > _Local Cache_ and click **Clear Cache & Reload**.
 

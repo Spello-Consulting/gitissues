@@ -84,6 +84,7 @@ struct ViewCommands: Commands {
     /// Published by the main window; `nil` (command disabled) when another window has focus or a
     /// refresh is already running.
     @FocusedValue(\.refreshIssuesAction) private var refreshIssues
+    @FocusedValue(\.reloadAllIssuesAction) private var reloadAllIssues
 
     var body: some Commands {
         CommandMenu("View") {
@@ -92,6 +93,12 @@ struct ViewCommands: Commands {
             }
             .keyboardShortcut("r", modifiers: .command)
             .disabled(refreshIssues == nil)
+
+            Button("Reload All Issues") {
+                reloadAllIssues?()
+            }
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+            .disabled(reloadAllIssues == nil)
 
             Divider()
 

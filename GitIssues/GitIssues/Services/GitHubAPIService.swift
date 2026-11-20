@@ -158,7 +158,10 @@ class GitHubAPIService {
             query: GraphQLQueries.issueForUpdateQuery,
             variables: ["owner": owner, "repo": repo, "number": number]
         )
-        return response.repository.issue.toIssue()
+        guard let node = response.repository?.issue else {
+            throw GraphQLError.notFound
+        }
+        return node.toIssue()
     }
 
     /// Fetches an issue's activity log: label/assignee/state changes, renames, cross-references, ...

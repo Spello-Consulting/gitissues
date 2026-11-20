@@ -190,7 +190,13 @@ Two bugs found in manual testing and fixed:
 * **Opening an issue that was deleted elsewhere showed "Failed to decode response".** GitHub returns
   `"issue": null` plus a `NOT_FOUND` error, which failed to decode. This is now `GraphQLError.notFound`, and the detail
   view removes the issue from the list immediately (the list selection follows `allIssues`, so the pane closes).
-  A Kanban move of such a stale card still reports a decode error; left as is.
+  A Kanban move of such a stale card gets the same treatment (the read step reports `notFound`; the card is removed
+  and a message says why).
+
+Follow-up: the toolbar Refresh button and ⌘R now use the same planner as the background sync (incremental when the
+last full sync is under 10 minutes old, full otherwise), so a manual refresh is ~0.7 s instead of ~8 s. View > Reload
+All Issues (⇧⌘R) always does a full reload, for noticing deletions immediately. (Nothing reloads the whole list
+after an edit any more; `IssueDetailViewModel.refreshList` is unused.)
 
 Success measures from the log: `issue cache load` (a few tens of ms), list visible at launch without waiting for the
 network, `launch incremental sync … changed=N` taking ~1 s instead of ~8–11 s, and timer syncs logging

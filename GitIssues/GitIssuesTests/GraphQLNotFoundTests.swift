@@ -47,6 +47,19 @@ final class GraphQLNotFoundTests: XCTestCase {
         XCTAssertEqual(response.errors?.map(\.isNotFound), [false, false])
     }
 
+    /// The Kanban move reads the issue first; a card whose issue was deleted must decode too.
+    func testDeletedIssueForUpdateResponseDecodesAndIsMarkedNotFound() throws {
+        let json = """
+        {"data":{"repository":{"issue":null}},
+         "errors":[{"type":"NOT_FOUND","path":["repository","issue"],
+                    "message":"Could not resolve to an Issue with the number of 113."}]}
+        """
+        let response = try JSONDecoder().decode(GraphQLResponse<IssueForUpdateResponse>.self, from: Data(json.utf8))
+
+        XCTAssertNil(response.data?.repository?.issue)
+        XCTAssertTrue(response.errors?.first?.isNotFound == true)
+    }
+
     func testNotFoundHasFriendlyDescription() {
         XCTAssertEqual(GraphQLError.notFound.localizedDescription, "This item no longer exists on GitHub.")
     }
