@@ -97,6 +97,10 @@ struct FilterOptions {
     var selectedRepositories: Set<String> = []
     var selectedLabels: Set<String> = []
     var sortOption: SortOption = .updatedDesc
+    /// Kanban board only: when `true`, cards are ordered by their dragged order key first and then by
+    /// `sortOption`; when `false` the keys are ignored and only `sortOption` applies. Not used by the
+    /// issue list, and not part of `matches(issue:viewerLogin:)`.
+    var kanbanDragged: Bool = true
     var searchText: String = ""
     /// Whether issues from read-only (archived / no-write-access) repos are shown.
     /// Not persisted in filter state — mirrored from `AppStateService.allowReadOnlyRepoAccess`.

@@ -24,6 +24,7 @@ struct AppState: Codable {
         var selectedRepositories: [String] // Convert Set to Array for Codable
         var selectedLabels: [String]? // Convert Set to Array for Codable
         var sortOption: String // SortOption id
+        var kanbanDragged: Bool? // Kanban "dragged order" toggle; nil (older saved state) means on
     }
 }
 
@@ -75,7 +76,8 @@ class AppStateService {
             involvementFilter: filterOptions.involvementFilter.rawValue,
             selectedRepositories: Array(filterOptions.selectedRepositories),
             selectedLabels: Array(filterOptions.selectedLabels),
-            sortOption: filterOptions.sortOption.id
+            sortOption: filterOptions.sortOption.id,
+            kanbanDragged: filterOptions.kanbanDragged
         )
         saveState(state)
     }
@@ -139,6 +141,7 @@ class AppStateService {
             selectedRepositories: Set(filterState.selectedRepositories),
             selectedLabels: Set(filterState.selectedLabels ?? []),
             sortOption: sortOption,
+            kanbanDragged: filterState.kanbanDragged ?? true,
             searchText: "" // Don't persist search text
         )
     }

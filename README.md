@@ -16,6 +16,17 @@ The first time you run the app you'll see a Connect to GitHub screen. Click the 
 
 By default, GitIssues only requests access to public repos (that you own or are collaborating on). If you also want to edit issues in your private repos, go the GitIssues > Settings... and turn on _Allow private repository access_. Your will be taken through the GitHub authorisation process again.
 
+## Sorting
+
+The **Sort** menu in the filter bar offers six orders: Updated, Created or Issue # (each newest/high first or oldest/low first). What it does depends on the view:
+
+- **List view.** Issues are sorted by the selected option. Pinned issues stay at the top.
+- **Kanban view.** The same six options apply to every column, and pinned state is ignored. The menu also has a **Kanban Dragged** switch (on by default):
+  - **On:** cards you have dragged keep the position you gave them, ahead of cards you have never dragged. Cards that share a position, and cards you have never dragged, follow the selected sort option.
+  - **Off:** your dragged positions are ignored and the selected sort option decides the whole order. You can still drag a card to another column to change its status, but not to reorder cards within a column. Switching back on restores your dragged order.
+
+Dragged positions are stored as a hidden comment at the end of the issue description (`<!-- gitissues:order=... -->`), so they are invisible on GitHub. Dropping a card between cards that have no stored position (or share one) may also update the stored position of a few neighbouring cards, so that the card lands exactly where you dropped it.
+
 ## Performance and the local cache
 
 GitIssues keeps a copy of your issue list on your Mac (a single JSON file in the app's sandbox, under `Application Support/IssueCache/`), so:

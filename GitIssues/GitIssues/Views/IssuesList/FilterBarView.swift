@@ -9,8 +9,26 @@ import SwiftUI
 
 struct FilterBarView: View {
     @ObservedObject var viewModel: IssuesListViewModel
+    /// Whether the Kanban board (rather than the issue list) is showing. Adds the "Kanban Dragged"
+    /// toggle to the Sort menu.
+    var isKanbanMode: Bool = false
     @State private var showRepositorySelector = false
     @State private var showLabelSelector = false
+
+    /// A Sort menu row for `option`, checkmarked when it is the selected option.
+    @ViewBuilder
+    private func sortButton(_ option: SortOption) -> some View {
+        Toggle(option.displayName, isOn: Binding(
+            get: { viewModel.filterOptions.sortOption.id == option.id },
+            set: { _ in viewModel.setSortOption(option) }
+        ))
+    }
+
+    /// The Sort menu's label. On the Kanban board with dragged order on, both parts apply.
+    private var sortLabel: String {
+        let name = viewModel.filterOptions.sortOption.displayName
+        return isKanbanMode && viewModel.filterOptions.kanbanDragged ? "Kanban Dragged + \(name)" : name
+    }
 
     var body: some View {
         VStack(spacing: 12) {
@@ -181,29 +199,24 @@ struct FilterBarView: View {
                         .foregroundColor(.secondary)
 
                     Menu {
-                        Button("Updated (Newest)") {
-                            viewModel.setSortOption(.updatedDesc)
+                        if isKanbanMode {
+                            Toggle("Kanban Dragged", isOn: Binding(
+                                get: { viewModel.filterOptions.kanbanDragged },
+                                set: { viewModel.setKanbanDragged($0) }
+                            ))
+                            Divider()
                         }
-                        Button("Updated (Oldest)") {
-                            viewModel.setSortOption(.updatedAsc)
-                        }
+                        sortButton(.updatedDesc)
+                        sortButton(.updatedAsc)
                         Divider()
-                        Button("Created (Newest)") {
-                            viewModel.setSortOption(.createdDesc)
-                        }
-                        Button("Created (Oldest)") {
-                            viewModel.setSortOption(.createdAsc)
-                        }
+                        sortButton(.createdDesc)
+                        sortButton(.createdAsc)
                         Divider()
-                        Button("Issue # (High to Low)") {
-                            viewModel.setSortOption(.numberDesc)
-                        }
-                        Button("Issue # (Low to High)") {
-                            viewModel.setSortOption(.numberAsc)
-                        }
+                        sortButton(.numberDesc)
+                        sortButton(.numberAsc)
                     } label: {
                         HStack(spacing: 4) {
-                            Text(viewModel.filterOptions.sortOption.displayName)
+                            Text(sortLabel)
                                 .font(.caption)
                             Image(systemName: "chevron.down")
                                 .font(.caption2)

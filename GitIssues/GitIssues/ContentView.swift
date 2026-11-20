@@ -159,7 +159,7 @@ struct ContentView: View {
 
                 // Filter bar
                 if let vm = viewModel.viewModel {
-                    FilterBarView(viewModel: vm)
+                    FilterBarView(viewModel: vm, isKanbanMode: kanbanViewEnabled)
                 }
 
                 Divider()
@@ -213,7 +213,7 @@ struct ContentView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                         } else {
                             ScrollViewReader { proxy in
-                            List(vm.filteredIssues, selection: $selectedIssues) { issue in
+                            List(vm.listIssues, selection: $selectedIssues) { issue in
                                 IssueRow(
                                     issue: issue,
                                     isPinned: vm.isPinned(issue.id),

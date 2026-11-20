@@ -27,6 +27,7 @@ enum Fixture {
 
     static func issue(
         id: String = "I_1",
+        number: Int = 1,
         title: String = "Title",
         body: String? = nil,
         state: IssueState = .open,
@@ -36,7 +37,7 @@ enum Fixture {
     ) -> Issue {
         Issue(
             id: id,
-            number: 1,
+            number: number,
             title: title,
             body: body,
             state: state,

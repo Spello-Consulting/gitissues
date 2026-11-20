@@ -67,9 +67,13 @@ enum Kanban {
         return present.count == 1 ? present[0] : defaultState
     }
 
-    /// Groups `issues` into board columns in a **single pass**, each column ordered for display:
-    /// manually-ordered issues (those with an order key) first, sorted by key, then unkeyed issues
-    /// in their incoming order.
+    /// Groups `issues` into board columns in a **single pass**, each column ordered for display.
+    ///
+    /// `issues` must already be in the user's selected sort order (the board passes
+    /// `filteredIssues`). With `useDragOrder` on, manually-ordered issues (those with an order key)
+    /// come first, sorted by key, then unkeyed issues in incoming order; issues sharing a key keep
+    /// their incoming (selected-sort) order. With it off, order keys are ignored and every column
+    /// simply keeps the incoming order.
     ///
     /// Placement is identical to calling `state(for:in:closedState:defaultState:)` per issue; this
     /// just avoids doing it once per column per render (the board used to scan the full list
@@ -79,13 +83,14 @@ enum Kanban {
         for issues: [Issue],
         in states: [KanbanState],
         closedState: KanbanState,
-        defaultState: KanbanState
+        defaultState: KanbanState,
+        useDragOrder: Bool = true
     ) -> [UUID: [Issue]] {
         let stateLabels = states.map { (state: $0, label: labelName(for: $0).lowercased()) }
 
-        var keyed: [UUID: [Issue]] = [:]
+        var keyed: [UUID: [(index: Int, issue: Issue)]] = [:]
         var unkeyed: [UUID: [Issue]] = [:]
-        for issue in issues {
+        for (index, issue) in issues.enumerated() {
             let target: KanbanState
             if issue.state == .closed {
                 target = closedState
@@ -98,8 +103,8 @@ enum Kanban {
                 }
                 target = matches == 1 ? (match ?? defaultState) : defaultState
             }
-            if issue.kanbanOrderKey != nil {
-                keyed[target.id, default: []].append(issue)
+            if useDragOrder && issue.kanbanOrderKey != nil {
+                keyed[target.id, default: []].append((index, issue))
             } else {
                 unkeyed[target.id, default: []].append(issue)
             }
@@ -107,7 +112,13 @@ enum Kanban {
 
         var result: [UUID: [Issue]] = [:]
         for state in states {
-            let sortedKeyed = (keyed[state.id] ?? []).sorted { ($0.kanbanOrderKey ?? "") < ($1.kanbanOrderKey ?? "") }
+            // Ties on the key are broken by incoming index, so the selected sort order applies
+            // within a group of equal keys (explicit rather than relying on sort stability).
+            let sortedKeyed = (keyed[state.id] ?? []).sorted { lhs, rhs in
+                let lk = lhs.issue.kanbanOrderKey ?? ""
+                let rk = rhs.issue.kanbanOrderKey ?? ""
+                return lk == rk ? lhs.index < rhs.index : lk < rk
+            }.map(\.issue)
             result[state.id] = sortedKeyed + (unkeyed[state.id] ?? [])
         }
         return result

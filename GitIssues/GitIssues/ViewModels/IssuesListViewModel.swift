@@ -11,7 +11,11 @@ import Combine
 @MainActor
 class IssuesListViewModel: ObservableObject {
     @Published var allIssues: [Issue] = []
+    /// Filtered and sorted by the selected Sort option. Pin state is **not** applied: the Kanban
+    /// board uses this directly.
     @Published var filteredIssues: [Issue] = []
+    /// `filteredIssues` with pinned issues moved to the front — what the issue list displays.
+    @Published var listIssues: [Issue] = []
     @Published var isLoading = false
     @Published var isRefreshing = false
     @Published var errorMessage: String?
@@ -61,10 +65,15 @@ class IssuesListViewModel: ObservableObject {
 
         // Observe filter changes and refilter
         Publishers.CombineLatest4($filterOptions, $allIssues, $pinnedIssueIDs, $viewerLogin)
-            .map { filterOptions, allIssues, pinnedIDs, viewerLogin in
-                Self.applyFiltersAndSort(filterOptions: filterOptions, to: allIssues, pinnedIDs: pinnedIDs, viewerLogin: viewerLogin)
+            .map { filterOptions, allIssues, _, viewerLogin in
+                Self.applyFiltersAndSort(filterOptions: filterOptions, to: allIssues, viewerLogin: viewerLogin)
             }
             .assign(to: &$filteredIssues)
+
+        // The issue list shows pinned issues first; the Kanban board ignores pins.
+        Publishers.CombineLatest($filteredIssues, $pinnedIssueIDs)
+            .map { filtered, pinnedIDs in Self.pinnedFirst(filtered, pinnedIDs: pinnedIDs) }
+            .assign(to: &$listIssues)
 
         // Save filter state whenever it changes
         $filterOptions
@@ -580,11 +589,12 @@ class IssuesListViewModel: ObservableObject {
         }
     }
 
-    /// Moves a single issue to a Kanban state (column) and sets its order key.
+    /// Moves a single issue to a Kanban state (column) and sets its order key. A `nil` key leaves
+    /// the issue's existing order marker untouched (used when "Kanban Dragged" is off).
     ///
     /// The cache is updated **optimistically** so the card moves immediately; the GitHub API
     /// calls run afterwards and reconcile (or revert) in the background.
-    func moveIssue(_ issue: Issue, to state: KanbanState, orderKey: String) async {
+    func moveIssue(_ issue: Issue, to state: KanbanState, orderKey: String?) async {
         let optimistic = makeOptimisticMove(issue, to: state, orderKey: orderKey)
         upsertIssueInCache(optimistic)
         if !filterOptions.matches(issue: optimistic, viewerLogin: viewerLogin) {
@@ -597,9 +607,10 @@ class IssuesListViewModel: ObservableObject {
         }
     }
 
-    /// Moves several issues into a Kanban state, assigning the given consecutive order keys.
+    /// Moves several issues into a Kanban state, assigning the given order keys (`nil` entries leave
+    /// that issue's marker untouched). Issues already in `state` are simply re-keyed.
     /// All cards move optimistically first; the API work then reconciles in the background.
-    func moveIssues(_ issues: [Issue], to state: KanbanState, orderKeys: [String]) async {
+    func moveIssues(_ issues: [Issue], to state: KanbanState, orderKeys: [String?]) async {
         var hidden = 0
         for (issue, key) in zip(issues, orderKeys) {
             let optimistic = makeOptimisticMove(issue, to: state, orderKey: key)
@@ -623,7 +634,7 @@ class IssuesListViewModel: ObservableObject {
     /// for the target's (unless it's the clutter-free default/closed state), the order marker set,
     /// and the open/closed state flipped to match the column. Used for the optimistic cache update;
     /// the real label IDs and body are reconciled once the API calls return.
-    private func makeOptimisticMove(_ issue: Issue, to state: KanbanState, orderKey: String) -> Issue {
+    private func makeOptimisticMove(_ issue: Issue, to state: KanbanState, orderKey: String?) -> Issue {
         let settings = KanbanSettingsService.shared
         let managed = settings.managedLabelNames
         var labels = issue.labels.filter { !managed.contains($0.name.lowercased()) }
@@ -639,7 +650,7 @@ class IssuesListViewModel: ObservableObject {
             id: issue.id,
             number: issue.number,
             title: issue.title,
-            body: KanbanOrderMarker.inject(orderKey, into: issue.body),
+            body: orderKey.map { KanbanOrderMarker.inject($0, into: issue.body) } ?? issue.body,
             state: state.isClosed ? .closed : .open,
             createdAt: issue.createdAt,
             updatedAt: issue.updatedAt,
@@ -653,7 +664,7 @@ class IssuesListViewModel: ObservableObject {
     /// Applies a Kanban move to GitHub, then upserts the canonical issue. Reverts to `original` on
     /// failure. Only labels matching a *configured* state are touched; other users' `kanban-*`
     /// labels are left intact.
-    private func performKanbanMove(_ issue: Issue, to state: KanbanState, orderKey: String, revertTo original: Issue) async {
+    private func performKanbanMove(_ issue: Issue, to state: KanbanState, orderKey: String?, revertTo original: Issue) async {
         let settings = KanbanSettingsService.shared
         let moveTimer = PerfTimer()
         var step = PerfTimer()
@@ -702,7 +713,8 @@ class IssuesListViewModel: ObservableObject {
             let newState: IssueState? = (state.isClosed != (current.state == .closed))
                 ? (state.isClosed ? .closed : .open)
                 : nil
-            let newBody = KanbanOrderMarker.inject(orderKey, into: current.body)
+            // With no key (Kanban Dragged off) the body is left alone, so any stored order survives.
+            let newBody = orderKey.map { KanbanOrderMarker.inject($0, into: current.body) }
             let updated = try await apiService.updateIssue(
                 issueId: issue.id, title: nil, body: newBody, state: newState, labelIds: labelIds
             )
@@ -893,22 +905,22 @@ class IssuesListViewModel: ObservableObject {
 
     // MARK: - Filters
 
-    /// Applies filters and sorting to issues
-    private static func applyFiltersAndSort(filterOptions: FilterOptions, to issues: [Issue], pinnedIDs: Set<String>, viewerLogin: String?) -> [Issue] {
+    /// Applies filters and sorting to issues. Pinned issues are not treated specially here.
+    private static func applyFiltersAndSort(filterOptions: FilterOptions, to issues: [Issue], viewerLogin: String?) -> [Issue] {
         let timer = PerfTimer()
         defer { PerfTimer.log("applyFiltersAndSort", timer, "in=\(issues.count)", slowAfterMs: 10) }
 
         // Filter issues
         let filtered = issues.filter { filterOptions.matches(issue: $0, viewerLogin: viewerLogin) }
 
-        // Sort issues
-        let sorted = filterOptions.sortOption.sort(filtered)
+        return filterOptions.sortOption.sort(filtered)
+    }
 
-        // Separate pinned and unpinned
-        let pinned = sorted.filter { pinnedIDs.contains($0.id) }
-        let unpinned = sorted.filter { !pinnedIDs.contains($0.id) }
-
-        // Return pinned first, then unpinned
+    /// `issues` with the pinned ones first; the relative order within each group is preserved.
+    static func pinnedFirst(_ issues: [Issue], pinnedIDs: Set<String>) -> [Issue] {
+        guard !pinnedIDs.isEmpty else { return issues }
+        let pinned = issues.filter { pinnedIDs.contains($0.id) }
+        let unpinned = issues.filter { !pinnedIDs.contains($0.id) }
         return pinned + unpinned
     }
 
@@ -945,6 +957,13 @@ class IssuesListViewModel: ObservableObject {
     func setInvolvementFilter(_ filter: InvolvementFilter) {
         var options = filterOptions
         options.involvementFilter = filter
+        filterOptions = options
+    }
+
+    /// Turns the Kanban board's "dragged order" on or off (see `FilterOptions.kanbanDragged`).
+    func setKanbanDragged(_ enabled: Bool) {
+        var options = filterOptions
+        options.kanbanDragged = enabled
         filterOptions = options
     }
 
