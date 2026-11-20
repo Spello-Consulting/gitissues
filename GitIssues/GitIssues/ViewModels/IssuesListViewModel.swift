@@ -51,7 +51,8 @@ class IssuesListViewModel: ObservableObject {
     /// an older generation (after a sign-out / cache clear) are dropped.
     private var cacheGeneration: Int
 
-    init(accessToken: String, cacheStore: IssueCacheStore = .shared) {
+    init(accessToken: String, cacheStore injectedCacheStore: IssueCacheStore? = nil) {
+        let cacheStore = injectedCacheStore ?? IssueCacheStore.shared
         self.apiService = GitHubAPIService(accessToken: accessToken)
         self.cacheStore = cacheStore
         self.cacheGeneration = cacheStore.generation

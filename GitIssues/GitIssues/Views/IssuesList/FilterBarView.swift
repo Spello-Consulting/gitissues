@@ -15,6 +15,14 @@ struct FilterBarView: View {
     @State private var showRepositorySelector = false
     @State private var showLabelSelector = false
 
+    /// Applies a filter change from a picker on the next main-actor turn rather than inside the
+    /// picker's binding setter. SwiftUI can call that setter while it is updating views, and
+    /// publishing a view-model change at that point logs "Publishing changes from within view
+    /// updates is not allowed". The control still shows the new selection immediately.
+    private func applyFilterChange(_ change: @escaping @MainActor () -> Void) {
+        Task { @MainActor in change() }
+    }
+
     /// A Sort menu row for `option`, checkmarked when it is the selected option.
     @ViewBuilder
     private func sortButton(_ option: SortOption) -> some View {
@@ -40,7 +48,7 @@ struct FilterBarView: View {
 
                 Picker("", selection: Binding(
                     get: { viewModel.filterOptions.stateFilter },
-                    set: { viewModel.setStateFilter($0) }
+                    set: { newValue in applyFilterChange { viewModel.setStateFilter(newValue) } }
                 )) {
                     ForEach(IssueStateFilter.allCases) { filter in
                         Text(filter.rawValue).tag(filter)
@@ -63,7 +71,7 @@ struct FilterBarView: View {
 
                     Picker("", selection: Binding(
                         get: { viewModel.filterOptions.visibilityFilter },
-                        set: { viewModel.setVisibilityFilter($0) }
+                        set: { newValue in applyFilterChange { viewModel.setVisibilityFilter(newValue) } }
                     )) {
                         ForEach(VisibilityFilter.allCases) { filter in
                             Text(filter.rawValue).tag(filter)
@@ -82,7 +90,7 @@ struct FilterBarView: View {
 
                     Picker("", selection: Binding(
                         get: { viewModel.filterOptions.involvementFilter },
-                        set: { viewModel.setInvolvementFilter($0) }
+                        set: { newValue in applyFilterChange { viewModel.setInvolvementFilter(newValue) } }
                     )) {
                         ForEach(InvolvementFilter.allCases) { filter in
                             Text(filter.rawValue).tag(filter)

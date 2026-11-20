@@ -11,7 +11,7 @@ import AppKit
 /// Severity levels in descending order of seriousness. The raw value doubles as the
 /// threshold ordering: a configured level logs every entry whose raw value is <= its own
 /// (e.g. `.information` logs information, warnings and errors, but not debug).
-enum LogLevel: Int, CaseIterable, Identifiable {
+nonisolated enum LogLevel: Int, CaseIterable, Identifiable {
     case error = 0
     case warning = 1
     case information = 2
@@ -45,7 +45,7 @@ enum LogLevel: Int, CaseIterable, Identifiable {
 /// Logs are written to the app's sandbox container at `Library/Logs` (resolved via
 /// `FileManager`, i.e. `~/Library/Containers/<bundle-id>/Data/Library/Logs`). The active
 /// file rotates when it reaches `maxFileSize`, retaining up to `maxFileCount` files total.
-final class AppLogger: @unchecked Sendable {
+nonisolated final class AppLogger: @unchecked Sendable {
     static let shared = AppLogger()
 
     /// UserDefaults key for the persisted minimum severity. Shared with the Settings UI.
