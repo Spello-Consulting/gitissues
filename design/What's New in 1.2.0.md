@@ -19,6 +19,7 @@ MUCH FASTER
 
 NEW FEATURES
 • Add or remove labels from an issue's right-click menu, or create a new label on the spot.
+• Edit labels on several issues at once, even across repositories. Labels show as ticked, dashed (some issues have it) or empty, and only the labels you click are changed. A label a repository doesn't have yet is created there for you.
 • Copy an issue to several repositories at once.
 • The issue detail now shows GitHub's activity log (labels, assignments, open/close) alongside comments. You can turn this off in Settings.
 • A progress bar shows background changes as they're processed.
