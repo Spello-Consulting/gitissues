@@ -19,7 +19,7 @@ struct ContentView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var issueToDelete: Issue?
     @State private var issueToAssign: Issue?
-    @State private var issueForLabels: Issue?
+    @State private var labelsRequest: LabelsRequest?
     @State private var showDeleteConfirmation = false
     @State private var sidebarWidth: CGFloat?
     @State private var windowWidth: CGFloat = 1200
@@ -60,7 +60,8 @@ struct ContentView: View {
             },
             clone: { issue in Task { await viewModel.viewModel?.cloneIssue(issue) } },
             assign: { issue in issueToAssign = issue },
-            editLabels: { issue in issueForLabels = issue },
+            editLabels: { issue in labelsRequest = LabelsRequest(issues: [issue]) },
+            batchEditLabels: { sel in labelsRequest = LabelsRequest(issues: Array(sel)) },
             copyToRepo: { issues in transferRequest = TransferRequest(mode: .copy, issues: issues) },
             moveToRepo: { issues in transferRequest = TransferRequest(mode: .move, issues: issues) },
             close: { issue in Task { await viewModel.viewModel?.closeIssue(issue) } },
@@ -327,6 +328,9 @@ struct ContentView: View {
                         batchOpIssues = selectedIssues
                         showBatchAssignSheet = true
                     },
+                    onBatchLabels: {
+                        labelsRequest = LabelsRequest(issues: Array(selectedIssues))
+                    },
                     onBatchCopy: {
                         transferRequest = TransferRequest(mode: .copy, issues: Array(selectedIssues))
                     },
@@ -505,10 +509,10 @@ struct ContentView: View {
             }
         }
         // Copy / move to another repository
-        .sheet(item: $issueForLabels) { issue in
+        .sheet(item: $labelsRequest) { request in
             if let vm = viewModel.viewModel {
-                IssueLabelsSheet(issue: issue, viewModel: vm) {
-                    issueForLabels = nil
+                IssueLabelsSheet(issues: request.issues, viewModel: vm) {
+                    labelsRequest = nil
                 }
             }
         }
@@ -524,6 +528,19 @@ struct ContentView: View {
                     }
                 )
             }
+        }
+    }
+}
+
+/// Identifiable request to edit the labels of one or more issues.
+struct LabelsRequest: Identifiable {
+    let id = UUID()
+    /// Ordered by repository then number, so batch updates run in a stable order.
+    let issues: [Issue]
+
+    init(issues: [Issue]) {
+        self.issues = issues.sorted {
+            ($0.repository.fullName, $0.number) < ($1.repository.fullName, $1.number)
         }
     }
 }
@@ -682,6 +699,7 @@ struct MultiSelectDetailView: View {
     let selectedIssues: Set<Issue>
     let onBatchClone: () -> Void
     let onBatchAssign: () -> Void
+    let onBatchLabels: () -> Void
     let onBatchCopy: () -> Void
     let onBatchMove: () -> Void
     let onBatchClose: () -> Void
@@ -738,6 +756,14 @@ struct MultiSelectDetailView: View {
                     onBatchAssign()
                 } label: {
                     SwiftUI.Label("Assign \(selectedIssues.count) Issues", systemImage: "person.badge.plus")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    onBatchLabels()
+                } label: {
+                    SwiftUI.Label("Labels for \(selectedIssues.count) Issues…", systemImage: "tag")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)

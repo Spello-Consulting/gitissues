@@ -124,12 +124,16 @@ struct LabelRow: View {
     let label: Label
     let isSelected: Bool
     let onToggle: () -> Void
+    /// Tri-state support for multi-issue label editing: some (not all) issues have the label.
+    var isMixed = false
+    /// Optional secondary text shown after the label, e.g. "in 2 of 3 repositories".
+    var caption: String?
 
     var body: some View {
         Button(action: onToggle) {
             HStack(spacing: 12) {
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundColor(isSelected ? .accentColor : .secondary)
+                Image(systemName: isMixed ? "minus.circle.fill" : (isSelected ? "checkmark.circle.fill" : "circle"))
+                    .foregroundColor(isSelected || isMixed ? .accentColor : .secondary)
                     .font(.title3)
 
                 Text(label.name)
@@ -140,6 +144,12 @@ struct LabelRow: View {
                     .background(Color(hex: label.color).opacity(0.2))
                     .foregroundColor(Color(hex: label.color))
                     .cornerRadius(4)
+
+                if let caption {
+                    Text(caption)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
 
                 Spacer()
             }
