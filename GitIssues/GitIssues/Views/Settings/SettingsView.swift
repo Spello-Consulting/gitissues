@@ -179,6 +179,8 @@ struct GeneralSettingsView: View {
 
 struct LoggingSettingsView: View {
     @AppStorage(AppLogger.logLevelKey) private var logLevelRaw = LogLevel.information.rawValue
+    @AppStorage(AppLogger.maxFileSizeMBKey) private var maxFileSizeMB = AppLogger.defaultMaxFileSizeMB
+    @AppStorage(AppLogger.maxFileCountKey) private var maxFileCount = AppLogger.defaultMaxFileCount
     @State private var showDeleteConfirmation = false
 
     var body: some View {
@@ -210,10 +212,14 @@ struct LoggingSettingsView: View {
                     Text("Log Files")
                         .font(.headline)
 
-                    Text("Logs are stored in the app's container and rotate automatically (up to 10 files, 20 MB each).")
+                    Text("Logs are stored in the app's container. When the current log reaches the maximum size it is archived and a new one started; the oldest files are deleted once the file limit is reached.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+
+                    limitRow("Maximum file size", unit: "MB", value: $maxFileSizeMB, range: AppLogger.maxFileSizeMBRange)
+                        .padding(.top, 4)
+                    limitRow("Maximum number of files", unit: nil, value: $maxFileCount, range: AppLogger.maxFileCountRange)
 
                     HStack {
                         Button("Reveal in Finder") {
@@ -239,6 +245,31 @@ struct LoggingSettingsView: View {
         } message: {
             Text("This permanently deletes all GitIssues log files. This cannot be undone.")
         }
+        .onChange(of: maxFileSizeMB) { _, newValue in
+            maxFileSizeMB = min(max(newValue, AppLogger.maxFileSizeMBRange.lowerBound), AppLogger.maxFileSizeMBRange.upperBound)
+        }
+        .onChange(of: maxFileCount) { _, newValue in
+            maxFileCount = min(max(newValue, AppLogger.maxFileCountRange.lowerBound), AppLogger.maxFileCountRange.upperBound)
+            AppLogger.shared.applyRetention()
+        }
+    }
+
+    /// A labelled numeric field with a stepper, constrained to `range`.
+    private func limitRow(_ title: String, unit: String?, value: Binding<Int>, range: ClosedRange<Int>) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            TextField(title, value: value, format: .number)
+                .labelsHidden()
+                .multilineTextAlignment(.trailing)
+                .frame(width: 60)
+            Stepper(title, value: value, in: range)
+                .labelsHidden()
+            if let unit {
+                Text(unit).foregroundColor(.secondary)
+            }
+        }
+        .frame(maxWidth: 360)
     }
 }
 

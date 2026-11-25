@@ -44,18 +44,30 @@ nonisolated enum LogLevel: Int, CaseIterable, Identifiable {
 ///
 /// Logs are written to the app's sandbox container at `Library/Logs` (resolved via
 /// `FileManager`, i.e. `~/Library/Containers/<bundle-id>/Data/Library/Logs`). The active
-/// file rotates when it reaches `maxFileSize`, retaining up to `maxFileCount` files total.
+/// file rotates when it reaches the configured maximum size (`maxFileSizeMB`), retaining up
+/// to `maxFileCount` files in total (active + archives). Both limits are user settings.
 nonisolated final class AppLogger: @unchecked Sendable {
     static let shared = AppLogger()
 
     /// UserDefaults key for the persisted minimum severity. Shared with the Settings UI.
     static let logLevelKey = "logLevel"
+    /// UserDefaults key for the maximum size of a single log file, in megabytes.
+    static let maxFileSizeMBKey = "logMaxFileSizeMB"
+    /// UserDefaults key for the maximum number of log files retained (active + archives).
+    static let maxFileCountKey = "logMaxFileCount"
+
+    static let defaultMaxFileSizeMB = 20
+    static let defaultMaxFileCount = 10
+    /// Allowed range for the size setting, in megabytes.
+    static let maxFileSizeMBRange = 1...500
+    /// Allowed range for the file count setting (active + archives).
+    static let maxFileCountRange = 1...50
 
     private let queue = DispatchQueue(label: "com.spelloconsulting.gitissues.logger", qos: .utility)
     private let fileManager = FileManager.default
+    private let defaults: UserDefaults
+    private let directoryOverride: URL?
 
-    private let maxFileSize: UInt64 = 20 * 1024 * 1024 // 20 MB
-    private let maxFileCount = 10                       // active + archives, 10 total
     private let baseName = "GitIssues"
     private let fileExtension = "log"
 
@@ -66,26 +78,51 @@ nonisolated final class AppLogger: @unchecked Sendable {
         return formatter
     }()
 
-    private init() {}
+    /// - Parameters:
+    ///   - directory: Log directory to use instead of the sandbox `Library/Logs` (for tests).
+    ///   - defaults: The defaults store holding the logging settings.
+    init(directory: URL? = nil, defaults: UserDefaults = .standard) {
+        self.directoryOverride = directory
+        self.defaults = defaults
+    }
 
     // MARK: - Configuration
 
     /// The minimum severity that will be written, persisted in UserDefaults. Defaults to `.information`.
     var currentLevel: LogLevel {
         get {
-            let defaults = UserDefaults.standard
             guard defaults.object(forKey: Self.logLevelKey) != nil else { return .information }
             return LogLevel(rawValue: defaults.integer(forKey: Self.logLevelKey)) ?? .information
         }
         set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: Self.logLevelKey)
+            defaults.set(newValue.rawValue, forKey: Self.logLevelKey)
         }
+    }
+
+    /// Maximum size of a single log file in megabytes, clamped to `maxFileSizeMBRange`.
+    var maxFileSizeMB: Int {
+        get { clampedSetting(Self.maxFileSizeMBKey, default: Self.defaultMaxFileSizeMB, range: Self.maxFileSizeMBRange) }
+        set { defaults.set(newValue, forKey: Self.maxFileSizeMBKey) }
+    }
+
+    /// Maximum number of log files retained (active + archives), clamped to `maxFileCountRange`.
+    var maxFileCount: Int {
+        get { clampedSetting(Self.maxFileCountKey, default: Self.defaultMaxFileCount, range: Self.maxFileCountRange) }
+        set { defaults.set(newValue, forKey: Self.maxFileCountKey) }
+    }
+
+    private var maxFileSize: UInt64 { UInt64(maxFileSizeMB) * 1024 * 1024 }
+
+    private func clampedSetting(_ key: String, default fallback: Int, range: ClosedRange<Int>) -> Int {
+        guard defaults.object(forKey: key) != nil else { return fallback }
+        return min(max(defaults.integer(forKey: key), range.lowerBound), range.upperBound)
     }
 
     // MARK: - Locations
 
     /// Directory containing the log files, creating it lazily on first write.
     var logDirectory: URL? {
+        if let directoryOverride { return directoryOverride }
         guard let library = fileManager.urls(for: .libraryDirectory, in: .userDomainMask).first else {
             return nil
         }
@@ -149,6 +186,19 @@ nonisolated final class AppLogger: @unchecked Sendable {
         }
     }
 
+    /// Deletes archives that exceed the configured file count. Call after the setting is
+    /// lowered so old files are removed straight away rather than at the next rotation.
+    func applyRetention() {
+        queue.async { [weak self] in
+            self?.trimArchives()
+        }
+    }
+
+    /// Blocks until all queued log writes and housekeeping have completed (for tests).
+    func flush() {
+        queue.sync {}
+    }
+
     /// Deletes all log files.
     func deleteAllLogs() {
         queue.async { [weak self] in
@@ -196,7 +246,15 @@ nonisolated final class AppLogger: @unchecked Sendable {
             return
         }
 
-        let archiveCount = maxFileCount - 1 // archives: GitIssues-1.log ... GitIssues-<archiveCount>.log
+        // Archives are GitIssues-1.log ... GitIssues-<archiveCount>.log. With a limit of one
+        // file there are no archives, so the full active file is simply discarded.
+        let archiveCount = maxFileCount - 1
+        trimArchives()
+
+        guard archiveCount >= 1 else {
+            try? fileManager.removeItem(at: activeFile)
+            return
+        }
 
         // Drop the oldest archive, if it exists.
         let oldest = directory.appendingPathComponent("\(baseName)-\(archiveCount).\(fileExtension)")
@@ -216,5 +274,19 @@ nonisolated final class AppLogger: @unchecked Sendable {
         // The active file becomes the newest archive.
         let firstArchive = directory.appendingPathComponent("\(baseName)-1.\(fileExtension)")
         try? fileManager.moveItem(at: activeFile, to: firstArchive)
+    }
+
+    /// Removes numbered archives beyond the configured limit (e.g. after the limit was lowered).
+    private func trimArchives() {
+        guard let directory = logDirectory else { return }
+        let archiveCount = maxFileCount - 1
+        let prefix = "\(baseName)-"
+        let contents = (try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        for file in contents where file.pathExtension == fileExtension && file.lastPathComponent.hasPrefix(prefix) {
+            let stem = file.deletingPathExtension().lastPathComponent
+            if let number = Int(stem.dropFirst(prefix.count)), number > archiveCount {
+                try? fileManager.removeItem(at: file)
+            }
+        }
     }
 }

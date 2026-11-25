@@ -17,6 +17,7 @@ struct GitIssuesApp: App {
 
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        AppLogger.shared.applyRetention()
         AppLogger.shared.info("GitIssues launched (version \(version), build \(build))")
     }
 
