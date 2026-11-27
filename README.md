@@ -58,6 +58,106 @@ The unit tests live in the `GitIssuesTests` target. Run them from Xcode (Product
 xcodebuild test -project GitIssues/GitIssues.xcodeproj -scheme GitIssues -destination 'platform=macOS'
 ```
 
+## Releasing to the Mac App Store
+
+Maintainer notes for publishing a new build. Manage the app at [App Store Connect](https://appstoreconnect.apple.com/apps); the live listing is at [apps.apple.com](https://apps.apple.com/au/app/gitissues/id6759181744?mt=12).
+
+**Prerequisites (already done):** a paid Apple Developer Program membership (not just a free Apple ID); the app registered in App Store Connect (macOS, name `GitIssues`, bundle ID `com.spelloconsulting.gitissues`, SKU `1000`, user access Full Access); Xcode installed; and the store metadata filled in (see [App Store Connect reference](#app-store-connect-reference)).
+
+### Releasing a new version
+
+1. **Bump the version.** In Xcode, go to GitIssues > Targets > GitIssues > General and increment the version number.
+2. **Commit, push and tag** (replace `v1.2.3` with the new version):
+
+   ```bash
+   git tag v1.2.3
+   git push origin v1.2.3
+   ```
+
+3. **Check the signing settings** (see [Signing](#signing)).
+4. **Build for release.** Product > Scheme > Edit Scheme > Archive, set Build Configuration to **Release**. Then Product > Destination > **Any Mac**, and Product > **Archive**.
+5. **Upload.** Window > Organizer, select the new archive, click **Distribute App**, choose **App Store Connect**, then **Distribute**.
+6. **Submit for review** in App Store Connect:
+   1. The uploaded build appears under **TestFlight**. Make sure its status is "Ready to Submit" (fix any export-compliance questions if asked).
+   2. Go to Distribution and click **+** to add a new version. You should now see "Prepare for Submission". Check the version number and update any other metadata.
+   3. Click **Save**, then **Add for Review**, then on the next page **Resubmit to App Review**.
+   4. Confirm the status is now "Waiting for Review".
+7. **Wait.** Review typically takes 24–48 hours for Mac apps. Approved builds go live immediately or on the date you scheduled. If rejected, read the Resolution Center feedback.
+
+**Resubmitting after a rejection:** fix the issues and upload a new build (steps 1–5). In App Store Connect, select the rejected submission under macOS App in the sidebar, scroll to Build, remove the old build and click **Add build** to choose the new one. Click **Save**, then **Update Review**, then **Resubmit to App Review**.
+
+### Signing
+
+In Xcode, GitIssues > Targets > GitIssues > Signing & Capabilities:
+
+- **Signing:** *Automatically manage signing* on; Team `SPELLO CONSULTING PTY LTD`; Bundle Identifier `com.spelloconsulting.gitissues`; macOS Signing Certificate left as *Development* (Xcode re-signs with the Apple Distribution certificate when you distribute from the Organizer).
+- **App Sandbox:** Outgoing Connections (Client) on; User Selected File set to Read Only; everything else off or None.
+- **Hardened Runtime (Release):** no runtime exceptions ticked.
+
+#### If the upload fails with "Signing certificate is invalid. It may have been revoked or expired."
+
+Xcode doesn't say which certificate is bad. Find out in a terminal:
+
+```bash
+security find-identity -v -p codesigning
+```
+
+Look for `CSSMERR_TP_CERT_REVOKED` (or an expired cert) next to the distribution certs. A revoked certificate can't be reinstated, so replace it:
+
+1. Xcode > Settings > Accounts, select the Spello Consulting team, click **Manage Certificates…**.
+2. Click **+** and create **Apple Distribution** and **Mac Installer Distribution**.
+3. Confirm *Automatically manage signing* is still on.
+4. Create a **new archive** (Product > Archive). Don't reuse the old one, because it was signed with the bad certificate. Leave *Automatically manage signing* selected in the Distribute wizard.
+5. Optional cleanup: in Keychain Access (login keychain > My Certificates), delete the old revoked entries. Identify them by **expiry date, not name**: Apple still names the Mac Installer Distribution certificate "3rd Party Mac Developer Installer", so an old and a new certificate can look identical. Never click "Revoke" on a valid certificate in Xcode.
+
+Notes:
+
+- Only the Apple Distribution and Mac Installer Distribution certificates matter for App Store uploads. Developer ID and Apple Development certificates are not used.
+- The current Apple Distribution and Mac Installer Distribution certificates were created on 27 Nov 2026 and **expire on 27 Nov 2027**. Check them before the first upload after that date.
+
+### App Store Connect reference
+
+**Required metadata** (all complete): description; keywords (max 100 characters); support URL; at least one Mac screenshot (1280×800 or 1440×900); App Review Information (explain the GitHub OAuth sign-in flow, and either provide a demo GitHub account or say the reviewer can use their own); privacy policy URL (required because of GitHub OAuth); age rating questionnaire; pricing; and App Privacy.
+
+**App Privacy.** The App Privacy "nutrition label" in App Store Connect must match the app's privacy manifest, and an Admin must complete it before the first submission. The manifest declares:
+
+| Setting | Value |
+|---|---|
+| Privacy tracking enabled | No |
+| Collected data: User ID | Linked to user; not used for tracking; purpose: App Functionality |
+| Collected data: Name | Linked to user; not used for tracking; purpose: App Functionality |
+| Accessed API: User Defaults | Reason `CA92.1` (access info from the same app) |
+
+**Keywords:** `github,issues,bug,tracker,repository,developer,markdown,git,code,project,task,kanban,todo,workflow`
+
+<details>
+<summary>App Store description</summary>
+
+**GitIssues — GitHub Issues, Without the Browser**
+
+GitIssues is a focused, native macOS app for managing GitHub issues across all your repositories. No browser tabs, no distractions — just your issues, organised and accessible from your desktop.
+
+Sign in with your GitHub account and get straight to work. GitIssues gives you a clean, fast interface for the things you actually do with issues every day: creating them, updating them, labelling them, assigning them, and closing them — across every repo you have access to.
+
+**Key Features**
+
+- Browse and search issues across multiple repositories from a single window.
+- Create new issues with full Markdown support and live preview.
+- Edit issue titles, descriptions, labels and comments.
+- Open and close issues without leaving the app.
+- Filter by state (open, closed), repository, visibility (public, private) and your involvement (creator, assignee, collaborator).
+- Rich Markdown rendering for issue descriptions and comments.
+- View and add comments on any issue.
+- Share, pin, clone and delete issues.
+- Sort the issue in a variety of ways.
+- Fast, native macOS experience - built with SwiftUI.
+- Secure GitHub OAuth sign-in - your credentials are never stored by the app.
+- Lightweight and private — no analytics, no tracking, no data collection beyond what's needed to connect to GitHub.
+
+**Built for developers who live in GitHub Issues and want a faster, cleaner way to stay on top of them.**
+
+</details>
+
 ## Known Limitations
 
 - With a very large number of issues (hundreds), the very first load after installing, or after clearing the cache, can take 8-10 seconds to complete; open issues appear within a couple of seconds. Later launches use the local cache.
